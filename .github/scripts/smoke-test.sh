@@ -32,6 +32,8 @@ fail() {
   exit 1
 }
 
+close_dialogs() { adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true; }
+
 # Taps the on-screen view whose content description is $1 (rail tabs, buttons).
 tap_desc() {
   local coords=""
@@ -63,6 +65,14 @@ PY
 adb shell dumpsys package com.google.android.webview 2>/dev/null | grep -m1 versionName > "$OUT/webview-version.txt" || true
 echo "Emulator WebView: $(cat "$OUT/webview-version.txt" 2>/dev/null)"
 
+# System pop-ups would sit on top of the app and swallow the test's key presses and taps:
+# the one-time "Viewing full screen" hint and "isn't responding" dialogs from a cold emulator.
+adb shell settings put secure immersive_mode_confirmations confirmed || true
+adb shell settings put global hide_error_dialogs 1 || true
+sleep 20
+close_dialogs
+adb shell input keyevent KEYCODE_HOME || true
+
 adb install -r "$APK" || fail "Could not install $APK"
 adb logcat -c || true
 adb logcat -b crash -c || true
@@ -77,6 +87,7 @@ alive || fail "The app is not running after start-up"
 shot "02-home"
 
 echo "== Menu over the start page"
+close_dialogs
 adb shell input keyevent KEYCODE_BACK
 sleep 2
 shot "03-menu-over-home"
@@ -86,6 +97,7 @@ sleep 1
 echo "== Menu tabs (static page, so the UI tree settles)"
 adb shell am start -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "https://example.com" || true
 sleep 8
+close_dialogs
 adb shell input keyevent KEYCODE_BACK
 sleep 2
 shot "04-menu-games"
@@ -105,6 +117,7 @@ sleep 30
 crashed && fail "The app crashed on vel.gg"
 alive || fail "The app is not running after opening vel.gg"
 shot "06-velgg"
+close_dialogs
 adb shell input keyevent KEYCODE_BACK
 sleep 2
 shot "07-velgg-menu"
