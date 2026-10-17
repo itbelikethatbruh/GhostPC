@@ -36,7 +36,7 @@ fail() {
 tap_desc() {
   local coords=""
   for _ in 1 2 3 4; do
-    if adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 &&
+    if adb shell uiautomator dump /sdcard/ui.xml >> "$OUT/uiautomator.txt" 2>&1 &&
        adb pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null 2>&1; then
       coords=$(python3 - "$OUT/ui.xml" "$1" <<'PY'
 import re, sys
@@ -76,14 +76,23 @@ crashed && fail "The app crashed during start-up"
 alive || fail "The app is not running after start-up"
 shot "02-home"
 
-echo "== Menu"
+echo "== Menu over the start page"
 adb shell input keyevent KEYCODE_BACK
 sleep 2
-shot "03-menu-games"
+shot "03-menu-over-home"
+adb shell input keyevent KEYCODE_BACK
+sleep 1
+
+echo "== Menu tabs (static page, so the UI tree settles)"
+adb shell am start -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "https://example.com" || true
+sleep 8
+adb shell input keyevent KEYCODE_BACK
+sleep 2
+shot "04-menu-games"
 for tab in Controls Display Buttons Status; do
   if tap_desc "$tab"; then
     sleep 1.5
-    shot "04-menu-$(echo "$tab" | tr '[:upper:]' '[:lower:]')"
+    shot "05-menu-$(echo "$tab" | tr '[:upper:]' '[:lower:]')"
   fi
 done
 crashed && fail "The app crashed while using the menu"
@@ -95,15 +104,17 @@ adb shell am start -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "https://v
 sleep 30
 crashed && fail "The app crashed on vel.gg"
 alive || fail "The app is not running after opening vel.gg"
-shot "05-velgg"
+shot "06-velgg"
 adb shell input keyevent KEYCODE_BACK
 sleep 2
+shot "07-velgg-menu"
 if tap_desc "Status"; then
   sleep 1.5
-  shot "06-velgg-status"
+  shot "08-velgg-status"
 fi
 
 crashed && fail "The app crashed"
 save_logs
 grep -E "RadiantIsolation|Radiant" "$OUT/logcat.txt" | tail -n 40 || true
+echo "::notice::Emulator WebView $(tr -s ' ' < "$OUT/webview-version.txt" 2>/dev/null)"
 echo "Launch test passed"

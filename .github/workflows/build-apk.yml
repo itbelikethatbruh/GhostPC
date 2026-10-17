@@ -115,6 +115,22 @@ jobs:
           path: smoke/
           if-no-files-found: warn
 
+      # Same files on the ci-smoke branch, readable without downloading the artifact zip.
+      - name: Publish screenshots to the ci-smoke branch
+        if: always() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          [ -d smoke ] || exit 0
+          cd smoke
+          [ -f logcat.txt ] && tail -n 20000 logcat.txt > logcat.tmp && mv logcat.tmp logcat.txt
+          git init -q
+          git checkout -q -b ci-smoke
+          git add -A
+          git -c user.name="github-actions" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Launch test for run ${{ github.run_number }}"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" ci-smoke
+
   # On the default branch (or a v* tag) the APK is also attached to a GitHub Release,
   # which is the easiest place to download it from a phone.
   release:
