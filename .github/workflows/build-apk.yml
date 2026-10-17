@@ -1,0 +1,86 @@
+name: Build APK
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle (with cache and wrapper validation)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Use your own signing key if configured
+        env:
+          KEYSTORE_B64: ${{ secrets.RADIANT_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.RADIANT_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RADIANT_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.RADIANT_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/radiant.jks"
+            {
+              echo "RADIANT_KEYSTORE_FILE=$RUNNER_TEMP/radiant.jks"
+              echo "RADIANT_KEYSTORE_PASSWORD=$KS_PASS"
+              echo "RADIANT_KEY_ALIAS=$KEY_ALIAS"
+              echo "RADIANT_KEY_PASSWORD=$KEY_PASS"
+            } >> "$GITHUB_ENV"
+            echo "Signing with the key from repository secrets."
+          else
+            echo "Signing with keystore/radiant-shared.jks (see README to use your own key)."
+          fi
+
+      - name: Build release and debug APKs
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease assembleDebug
+
+      - name: Collect APKs
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/RadiantPCGameBrowser-${{ github.run_number }}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/RadiantPCGameBrowser-${{ github.run_number }}-debug.apk"
+          ls -la dist
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadiantPCGameBrowser-${{ github.run_number }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+      # On the default branch (or a v* tag) the APK is also attached to a GitHub Release,
+      # which is the easiest place to download it from a phone.
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v'))
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: Radiant PC Game Browser build ${{ github.run_number }}
+          body: |
+            Install `RadiantPCGameBrowser-${{ github.run_number }}.apk` on your phone or tablet.
+            The `-debug` APK installs side by side and enables chrome://inspect debugging over USB.
+          files: dist/*.apk
+          make_latest: true
