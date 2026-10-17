@@ -55,7 +55,22 @@ jobs:
       - name: Build release and debug APKs
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace assembleRelease assembleDebug
+          set -o pipefail
+          ./gradlew --no-daemon --stacktrace assembleRelease assembleDebug 2>&1 | tee build-log.txt
+
+      # Readable without downloading a log archive: the failed build's output on the ci-smoke branch.
+      - name: Publish the build log on failure
+        if: failure() && github.event_name == 'push'
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ci-log && cd ci-log
+          grep -v "^Download\|^Checking the license\|^Warning: unable to find" ../build-log.txt | tail -n 400 > build-log.txt
+          git init -q && git checkout -q -b ci-smoke
+          git add -A
+          git -c user.name="github-actions" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Build log for failed run ${{ github.run_number }}"
+          git push -q -f "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.git" ci-smoke
 
       - name: Collect APKs
         run: |
