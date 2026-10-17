@@ -28,8 +28,10 @@ Local build: `./gradlew assembleRelease`, with JDK 17 and the Android SDK (API 3
 ## Controls
 
 **Anywhere**
-- **Select + Start** (or **Guide**): open / close the command drawer. The Android Back button and the ☰ button do the same.
+- **Select + Start** (or **Guide**): open / close the command drawer. The Android Back button and the menu button (top left) do the same.
+- **In the drawer:** LB / RB switch tabs (Games, Controls, Display, Buttons, Status), the D-pad moves focus, A selects, B goes back or closes.
 - **L3 + R3:** toggle the virtual mouse cursor.
+- **During the launch animation:** any tap or button skips it.
 
 **PC keyboard + mouse mode (default)**
 
@@ -67,11 +69,39 @@ Every button can be rebound in the drawer to any key, mouse button, wheel direct
 
 A physical USB/Bluetooth mouse is captured for real relative movement while a game holds pointer lock.
 
+## Multithreaded games ("Shared memory is unavailable")
+
+Sites like vel.gg check for `SharedArrayBuffer` and `crossOriginIsolated`. That is a capability check, not a browser check, so no user-agent or identity spoof can get past it. The page needs real shared memory.
+
+Android WebView ignores COOP + COEP. It only isolates a page when **both** of these hold:
+1. the app allowlists the site's origin (`Profile.setCrossOriginIsolatedAllowlist`, androidx.webkit 1.18), and
+2. the page is served with a `Document-Isolation-Policy` header.
+
+Radiant does both:
+- **Detection:** the page script checks each site's own COOP / COEP headers. If a site asks for isolation, Radiant allowlists that origin and reloads once ("Turn on when a site asks", on by default). vel.gg is on from the start.
+- **Header:** for allowlisted sites, the app fetches HTML documents itself and adds `Document-Isolation-Policy: isolate-and-require-corp` (or `isolate-and-credentialless` when the site uses credentialless COEP).
+- **Manual control:** Games tab → *Multithreading* switches it per site. Display tab lists every site that has it on.
+
+This needs an Android System WebView recent enough to support the allowlist. If yours is older, the drawer says "Needs a newer Android System WebView": update it from the Play Store.
+
+## Browser identity
+
+Display tab → *Browser identity* picks what sites see. The page reloads after a change.
+
+| Identity | User agent and client hints |
+| --- | --- |
+| Chrome (default) | Chrome on Windows 11, real WebView version |
+| Edge | Chrome UA plus `Edg/`, "Microsoft Edge" brand in client hints |
+| Firefox | Firefox on Windows 11; `navigator.userAgentData`, `window.chrome` and `deviceMemory` are removed |
+| Android | No spoofing: the stock WebView identity and touch environment |
+
+Firefox identity only changes what JavaScript and headers report. The engine is still Chromium, so a site that tests Firefox-only features will see Chromium behaviour.
+
 ## How it differs from the original spec, and why
 
 | Spec asked for | What this build does | Why |
 | --- | --- | --- |
-| COOP/COEP headers so SharedArrayBuffer works | The shim probes whether shared WebAssembly memory can reach a Worker. It defines `SharedArrayBuffer` only if it can, and the drawer shows the result. | Android WebView never becomes cross-origin isolated, so injected headers change nothing. Faking the global sends libraries that have a single-thread fallback down a threaded path that then crashes. **Multithreaded WASM builds may simply not run in any WebView app.** |
+| COOP/COEP headers so SharedArrayBuffer works | Per-site origin allowlist plus an injected `Document-Isolation-Policy` header (see *Multithreaded games*). The shim never fakes `SharedArrayBuffer`. | WebView ignores COOP + COEP entirely. Faking the global sends libraries that have a single-thread fallback down a threaded path that then crashes. |
 | Always advertise OES_texture_float, WEBGL_depth_texture, etc. | Advertise only what is real or truly emulated: S3TC (software DXT1/3/5 decoder) and anisotropic filtering (safe no-op). | A fake extension the GPU can't back produces GL errors and black textures instead of the game's own fallback path. |
 | Report MAX_TEXTURE_IMAGE_UNITS ≥ 16/32 | Real values are reported. | Shaders written against inflated limits fail to link. |
 | Y = mouse wheel **and** 1/2 toggle | Y = wheel down; "Toggle 1/2" is a separate binding. | Sending both switches weapons twice per press. |
@@ -84,7 +114,7 @@ A physical USB/Bluetooth mouse is captured for real relative movement while a ga
 ## Known limitations
 
 - **Engine:** games are limited by Android System WebView (Chromium) on a phone GPU. Keep Android System WebView updated from the Play Store.
-- **Threads:** multithreaded (pthreads) WASM builds may fail; the drawer's *Status* section says whether threads are available.
+- **Threads:** shared memory needs a WebView that supports the isolation allowlist (see *Multithreaded games*). The drawer's *Status* tab shows whether the current page has it. A page reached through an HTTP redirect may load without isolation; open its final URL directly (or bookmark it) if that happens.
 - **S3TC cost:** each S3TC texture is decoded once on upload, about 70-130 ms for a 2048×2048 DXT5 texture on a desktop CPU and slower on phones. Decoded textures use 4-8× more GPU memory. If a game crashes with "out of memory", try 50% resolution; the app reloads crashed renderers automatically.
 - **Worker rendering:** WebGL rendered from Workers (OffscreenCanvas) is not covered by the S3TC shim.
 - **Desktop spoofing:** CSS `@media (pointer: coarse)` rules inside stylesheets still see the touchscreen; JavaScript `matchMedia` is spoofed.

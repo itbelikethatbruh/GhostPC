@@ -7,6 +7,9 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
+import android.os.Build
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -39,6 +42,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -71,7 +75,9 @@ class MainActivity : ComponentActivity(),
     private lateinit var cursorView: CursorOverlayView
     private lateinit var cursor: VirtualCursor
     private lateinit var drawer: CommandDrawer
-    private lateinit var menuButton: TextView
+    private lateinit var menuButton: View
+    private lateinit var isolation: IsolationManager
+    private var splash: SplashView? = null
     private lateinit var banner: LinearLayout
     private lateinit var bannerText: TextView
     private lateinit var bannerAllowOnce: TextView
@@ -90,7 +96,9 @@ class MainActivity : ComponentActivity(),
 
     private var chromeMajor = "131"
     private var chromeFull = "131.0.0.0"
-    private var desktopUa = ""
+    private var desktopUa: String? = null
+    private var defaultUa = ""
+    private val autoIsolated = HashSet<String>()
     private var webViewVersion = "unknown"
 
     private var pageScale = 0f
@@ -154,11 +162,12 @@ class MainActivity : ComponentActivity(),
 
         prefs = Prefs(this)
         shield = NavigationShield(prefs)
+        isolation = IsolationManager(prefs)
         shimSource = resources.openRawResource(R.raw.pc_engine_shim).bufferedReader().use { it.readText() }
         resolveEngineVersions()
 
         root = FrameLayout(this)
-        root.setBackgroundColor(Color.BLACK)
+        root.setBackgroundColor(Ui.NIGHT)
         setContentView(root)
 
         createWebView()
@@ -190,6 +199,15 @@ class MainActivity : ComponentActivity(),
         controller = ControllerManager(this, this)
         controller.setVirtualPadEnabled(prefs.touchGamepad)
 
+        val intro = SplashView(this) {
+            splash?.let { root.removeView(it) }
+            splash = null
+            if (!drawer.isOpen) webView?.requestFocus()
+        }
+        splash = intro
+        root.addView(intro, matchParent())
+        intro.start()
+
         root.setOnApplyWindowInsetsListener { _, insets ->
             applyCutout(insets)
             insets
@@ -197,7 +215,11 @@ class MainActivity : ComponentActivity(),
 
         onBackPressedDispatcher.addCallback(object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (drawer.isOpen) closeDrawer() else openDrawer(fromController = false)
+                when {
+                    splash != null -> splash?.requestSkip()
+                    drawer.isOpen -> if (!drawer.handleBack()) closeDrawer()
+                    else -> openDrawer(fromController = false)
+                }
             }
         })
 
@@ -253,6 +275,10 @@ class MainActivity : ComponentActivity(),
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        splash?.let {
+            if (event.action == KeyEvent.ACTION_UP) it.requestSkip()
+            if (event.keyCode != KeyEvent.KEYCODE_VOLUME_UP && event.keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return true
+        }
         if (::controller.isInitialized && controller.handleKeyEvent(event)) return true
         return super.dispatchKeyEvent(event)
     }
@@ -267,7 +293,7 @@ class MainActivity : ComponentActivity(),
     // =====================================================================================
 
     private fun resolveEngineVersions() {
-        val defaultUa = try {
+        defaultUa = try {
             WebSettings.getDefaultUserAgent(this)
         } catch (_: Throwable) {
             ""
@@ -277,8 +303,23 @@ class MainActivity : ComponentActivity(),
             chromeFull = it.groupValues[1] + "." + it.groupValues[2]
         }
         WebViewCompat.getCurrentWebViewPackage(this)?.let { webViewVersion = it.packageName + " " + it.versionName }
-        desktopUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+        desktopUa = userAgentFor(prefs.identity)
+    }
+
+    /** User agent for the chosen identity; null means the real Android WebView user agent. */
+    private fun userAgentFor(identity: String): String? {
+        val chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Chrome/$chromeMajor.0.0.0 Safari/537.36"
+        return when (identity) {
+            Prefs.IDENTITY_ANDROID -> null
+            Prefs.IDENTITY_EDGE -> "$chrome Edg/$chromeMajor.0.0.0"
+            Prefs.IDENTITY_FIREFOX -> {
+                // Firefox and Chrome release on the same 4-week train, about one version apart.
+                val v = (chromeMajor.toIntOrNull() ?: 131) + 1
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:$v.0) Gecko/20100101 Firefox/$v.0"
+            }
+            else -> chrome
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -307,13 +348,14 @@ class MainActivity : ComponentActivity(),
         s.offscreenPreRaster = true
         s.textZoom = 100
         s.userAgentString = desktopUa
-        if (WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
+        if (desktopUa != null && WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)) {
             try {
-                WebSettingsCompat.setUserAgentMetadata(s, buildUaMetadata())
+                WebSettingsCompat.setUserAgentMetadata(s, buildUaMetadata(prefs.identity))
             } catch (t: Throwable) {
                 Log.w(TAG, "UA metadata not applied", t)
             }
         }
+        isolation.userAgent = s.userAgentString ?: defaultUa
 
         wv.webViewClient = Client()
         wv.webChromeClient = Chrome()
@@ -335,19 +377,28 @@ class MainActivity : ComponentActivity(),
 
         root.addView(wv, 0, matchParent())
         webView = wv
+        isolation.apply(wv)
     }
 
-    private fun buildUaMetadata(): UserAgentMetadata {
+    private fun buildUaMetadata(identity: String): UserAgentMetadata {
         fun brand(name: String, major: String, full: String): UserAgentMetadata.BrandVersion =
             UserAgentMetadata.BrandVersion.Builder().setBrand(name).setMajorVersion(major).setFullVersion(full).build()
-        return UserAgentMetadata.Builder()
-            .setBrandVersionList(
-                listOf(
-                    brand("Google Chrome", chromeMajor, chromeFull),
-                    brand("Chromium", chromeMajor, chromeFull),
-                    brand("Not_A Brand", "24", "24.0.0.0")
-                )
+        val brands = when (identity) {
+            // Firefox sends no client hints; keep WebView's mandatory list as neutral as possible.
+            Prefs.IDENTITY_FIREFOX -> listOf(brand("Not_A Brand", "24", "24.0.0.0"))
+            Prefs.IDENTITY_EDGE -> listOf(
+                brand("Microsoft Edge", chromeMajor, chromeFull),
+                brand("Chromium", chromeMajor, chromeFull),
+                brand("Not_A Brand", "24", "24.0.0.0")
             )
+            else -> listOf(
+                brand("Google Chrome", chromeMajor, chromeFull),
+                brand("Chromium", chromeMajor, chromeFull),
+                brand("Not_A Brand", "24", "24.0.0.0")
+            )
+        }
+        return UserAgentMetadata.Builder()
+            .setBrandVersionList(brands)
             .setFullVersion(chromeFull)
             .setPlatform("Windows")
             .setPlatformVersion("15.0.0")
@@ -361,7 +412,8 @@ class MainActivity : ComponentActivity(),
 
     private fun buildScript(): String {
         val boot = JSONObject()
-            .put("ua", desktopUa)
+            .put("ua", desktopUa ?: defaultUa)
+            .put("identity", prefs.identity)
             .put("chromeMajor", chromeMajor)
             .put("chromeFull", chromeFull)
             .put("bridge", WebBridge.JS_OBJECT_NAME)
@@ -407,6 +459,7 @@ class MainActivity : ComponentActivity(),
             if (shield.isAdHost(host)) {
                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
             }
+            if (isolation.shouldIntercept(request)) return isolation.fetchIsolated(request)
             return null
         }
 
@@ -515,6 +568,10 @@ class MainActivity : ComponentActivity(),
             return true
         }
 
+        override fun onProgressChanged(view: WebView, newProgress: Int) {
+            splash?.setProgress(newProgress / 100f)
+        }
+
         override fun onPermissionRequest(request: PermissionRequest) {
             request.deny()
         }
@@ -543,6 +600,29 @@ class MainActivity : ComponentActivity(),
         } else {
             showBlocked(uri, popup = true)
         }
+    }
+
+    /** Identity changes need a fresh WebView: UA client hints cannot be unset on a live one. */
+    private fun rebuildWebView() {
+        val old = webView ?: return
+        val url = old.url ?: prefs.lastUrl
+        webView = null
+        root.removeView(old)
+        old.destroy()
+        scriptHandler = null
+        bridge.clear()
+        lockOwnerId = 0
+        glStatus = ""
+        threadStatus = ""
+        cursor.cancel()
+        desktopUa = userAgentFor(prefs.identity)
+        createWebView()
+        if (drawer.isOpen) {
+            webView?.isFocusable = false
+            webView?.isFocusableInTouchMode = false
+            applyBackdropBlur(true)
+        }
+        url?.let { loadTrusted(it) }
     }
 
     private fun recoverRenderer(dead: WebView, crashed: Boolean) {
@@ -635,6 +715,7 @@ class MainActivity : ComponentActivity(),
                 if (frame.isMainFrame || threadStatus.isEmpty()) threadStatus = msg.optString("sab")
                 drawer.refreshStatus()
             }
+            "coi" -> onIsolationRequested(frame)
             "rumble" -> {
                 val ms = msg.optDouble("ms", 0.0)
                 controller.rumble(
@@ -645,6 +726,23 @@ class MainActivity : ComponentActivity(),
                 )
             }
         }
+    }
+
+    /**
+     * A page whose headers ask for cross-origin isolation (it wants SharedArrayBuffer threads).
+     * The origin comes from WebView (frame.origin), never from the page's own message.
+     */
+    private fun onIsolationRequested(frame: WebBridge.Frame) {
+        val origin = IsolationManager.originOf(frame.origin) ?: return
+        if (!isolation.supported) {
+            threadStatus = "unavailable: this Android System WebView is too old for multithreading"
+            if (::drawer.isInitialized) drawer.refreshStatus()
+            return
+        }
+        if (isolation.isEnabled(origin) || !prefs.autoThreads || !autoIsolated.add(origin)) return
+        isolation.setEnabled(webView, origin, true)
+        toast("Turned on multithreading for " + (Uri.parse(origin).host ?: origin) + ", reloading")
+        webView?.reload()
     }
 
     override fun onFrameGone(frame: WebBridge.Frame) {
@@ -702,7 +800,9 @@ class MainActivity : ComponentActivity(),
                     else -> f.performClick()
                 }
             }
-            1 -> closeDrawer()
+            1 -> if (!drawer.handleBack()) closeDrawer()
+            4 -> drawer.cycleTab(-1)
+            5 -> drawer.cycleTab(1)
         }
     }
 
@@ -917,6 +1017,7 @@ class MainActivity : ComponentActivity(),
             it.isFocusableInTouchMode = false
             it.clearFocus()
         }
+        applyBackdropBlur(true)
         drawer.open(fromController)
         menuButton.visibility = View.GONE
         updateCursorState()
@@ -926,6 +1027,7 @@ class MainActivity : ComponentActivity(),
     private fun closeDrawer() {
         if (!drawer.isOpen) return
         drawer.close()
+        applyBackdropBlur(false)
         menuButton.visibility = View.VISIBLE
         touchPad.visibility = if (prefs.touchGamepad) View.VISIBLE else View.GONE
         controller.resetStates()
@@ -963,11 +1065,6 @@ class MainActivity : ComponentActivity(),
         webView?.reload()
     }
 
-    override fun goHome() {
-        loadTrusted(DEFAULT_URL)
-        closeDrawer()
-    }
-
     override fun exitApp() {
         finishAndRemoveTask()
     }
@@ -978,15 +1075,39 @@ class MainActivity : ComponentActivity(),
 
     override fun currentUrl(): String? = webView?.url
 
-    override fun isCurrentSiteAllowed(): Boolean {
-        val host = webView?.url?.let { Uri.parse(it).host } ?: return false
-        return shield.isAllowedHost(host)
+    override fun siteRedirectState(): Int {
+        val host = webView?.url?.let { Uri.parse(it).host } ?: return CommandDrawer.SITE_NONE
+        return when {
+            shield.isBuiltInAllowed(host) -> CommandDrawer.SITE_BUILT_IN
+            shield.isUserAllowed(host) -> CommandDrawer.SITE_ALLOWED
+            else -> CommandDrawer.SITE_SHIELDED
+        }
     }
 
-    override fun allowCurrentSiteAlways() {
+    override fun setCurrentSiteAllowed(allowed: Boolean) {
         val host = webView?.url?.let { Uri.parse(it).host } ?: return
-        shield.allowAlways(host)
-        toast("Always allowing $host")
+        if (allowed) shield.allowAlways(host) else shield.removeAlways(host)
+    }
+
+    override fun threadsSupported(): Boolean = isolation.supported
+
+    override fun isThreadsEnabledForCurrentSite(): Boolean = isolation.isEnabled(IsolationManager.originOf(webView?.url))
+
+    override fun setThreadsForCurrentSite(enabled: Boolean) {
+        val origin = IsolationManager.originOf(webView?.url) ?: return
+        isolation.setEnabled(webView, origin, enabled)
+        webView?.reload()
+    }
+
+    override fun threadOrigins(): List<String> = isolation.origins.toList()
+
+    override fun removeThreadOrigin(origin: String) {
+        isolation.setEnabled(webView, origin, false)
+        if (IsolationManager.originOf(webView?.url) == origin) webView?.reload()
+    }
+
+    override fun onIdentityChanged() {
+        rebuildWebView()
     }
 
     override fun onSettingsChanged(reloadPage: Boolean) {
@@ -1009,24 +1130,48 @@ class MainActivity : ComponentActivity(),
 
     override fun isCursorEnabled(): Boolean = cursorOverride ?: autoCursorWanted()
 
-    override fun statusText(): String {
+    override fun statusItems(): List<CommandDrawer.StatusItem> {
+        val ok = CommandDrawer.LEVEL_OK
+        val warn = CommandDrawer.LEVEL_WARN
+        val bad = CommandDrawer.LEVEL_BAD
+        val info = CommandDrawer.LEVEL_INFO
+        val items = ArrayList<CommandDrawer.StatusItem>()
         val pads = controller.controllerNames
-        val sb = StringBuilder()
-        sb.append("Controllers: ")
-            .append(if (pads.isEmpty()) "none (pair over Bluetooth or plug in USB-C)" else pads.joinToString(", "))
-            .append('\n')
-        sb.append("Engine: Chrome ").append(chromeFull).append(" (").append(webViewVersion).append(")\n")
-        sb.append("Presented to sites as: Windows 11, Chrome ").append(chromeMajor).append('\n')
-        sb.append("Game frame: ").append(if (glStatus.isEmpty()) "no WebGL context yet" else glStatus).append('\n')
-        sb.append("Threads (SharedArrayBuffer): ").append(if (threadStatus.isEmpty()) "unknown" else threadStatus).append('\n')
-        sb.append("Pointer lock: ").append(if (lockOwnerId != 0) "held by the game" else "free")
-        if (hasExternalMouse()) sb.append(" · physical mouse detected")
-        sb.append('\n')
-        sb.append("Script injection: ")
-            .append(if (docStartSupported) "document-start OK" else "LIMITED - update Android System WebView")
-            .append(" · controller bridge ")
-            .append(if (messageListenerSupported) "OK" else "unavailable")
-        return sb.toString()
+        items.add(CommandDrawer.StatusItem("Controller",
+            if (pads.isEmpty()) "None connected. Pair one over Bluetooth or plug it in." else pads.joinToString("\n"),
+            if (pads.isEmpty()) warn else ok))
+        items.add(CommandDrawer.StatusItem("Engine", "Chrome $chromeFull\n$webViewVersion", info))
+        val identity = when (prefs.identity) {
+            Prefs.IDENTITY_EDGE -> "Edge on Windows 11"
+            Prefs.IDENTITY_FIREFOX -> "Firefox on Windows 11"
+            Prefs.IDENTITY_ANDROID -> "Android WebView (not spoofed)"
+            else -> "Chrome on Windows 11"
+        }
+        items.add(CommandDrawer.StatusItem("Sites see", identity, info))
+        items.add(CommandDrawer.StatusItem("Graphics",
+            if (glStatus.isEmpty()) "No WebGL game running on this page" else glStatus,
+            if (glStatus.isEmpty()) info else ok))
+        val threadsLevel = when {
+            threadStatus.startsWith("native") || threadStatus.startsWith("polyfilled") -> ok
+            !isolation.supported -> bad
+            threadStatus.isEmpty() -> info
+            else -> warn
+        }
+        val threadsText = when {
+            threadStatus.isEmpty() -> if (isolation.supported) "Unknown until a page loads" else "Needs a newer Android System WebView"
+            threadStatus.startsWith("native") -> "Available on this page"
+            !isolation.supported -> "Not available. Update Android System WebView from the Play Store."
+            else -> "Not on this page. Turn on Multithreading in Games if the game needs it."
+        }
+        items.add(CommandDrawer.StatusItem("Multithreading", threadsText, threadsLevel))
+        items.add(CommandDrawer.StatusItem("Mouse capture",
+            (if (lockOwnerId != 0) "Held by the game" else "Free") + if (hasExternalMouse()) ", physical mouse connected" else "",
+            info))
+        items.add(CommandDrawer.StatusItem("Page script",
+            if (docStartSupported && messageListenerSupported) "Running in every frame"
+            else "Limited. Update Android System WebView from the Play Store.",
+            if (docStartSupported && messageListenerSupported) ok else bad))
+        return items
     }
 
     override fun requestCloseDrawer() {
@@ -1043,6 +1188,14 @@ class MainActivity : ComponentActivity(),
         c.hide(WindowInsetsCompat.Type.systemBars())
     }
 
+    /** Frosted-glass backdrop behind the open panel (Android 12+). */
+    private fun applyBackdropBlur(on: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val wv = webView ?: return
+        val r = dp(18f).toFloat()
+        wv.setRenderEffect(if (on) RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP) else null)
+    }
+
     private fun applyCutout(insets: WindowInsets) {
         val cut = insets.displayCutout
         val l = cut?.safeInsetLeft ?: 0
@@ -1057,15 +1210,13 @@ class MainActivity : ComponentActivity(),
         touchPad.setSafeInsets(l, r)
     }
 
-    private fun buildMenuButton(): TextView = TextView(this).apply {
-        text = "☰"
-        setTextColor(Color.WHITE)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-        gravity = Gravity.CENTER
-        background = Ui.rounded(this@MainActivity, 0x80000000.toInt(), 22f, 0x66FFFFFF, 1f)
-        alpha = 0.6f
+    private fun buildMenuButton(): View = ImageView(this).apply {
+        setImageDrawable(Icon(this@MainActivity, Icon.Kind.MENU, Ui.TEXT, 20f))
+        scaleType = ImageView.ScaleType.CENTER
+        background = Ui.rounded(this@MainActivity, 0xB316121F.toInt(), 22f, Ui.ACCENT_DIM, 1f)
+        alpha = 0.75f
         isFocusable = false
-        contentDescription = "Open command drawer"
+        contentDescription = "Open menu"
         setOnClickListener { openDrawer(fromController = false) }
     }
 
@@ -1073,7 +1224,7 @@ class MainActivity : ComponentActivity(),
         val b = LinearLayout(this)
         b.orientation = LinearLayout.HORIZONTAL
         b.gravity = Gravity.CENTER_VERTICAL
-        b.background = Ui.rounded(this, 0xEE1B1F27.toInt(), 12f, Ui.ACCENT_DIM, 1f)
+        b.background = Ui.rounded(this, 0xF016121F.toInt(), 16f, Ui.ACCENT_DIM, 1f)
         b.setPadding(dp(12f), dp(6f), dp(6f), dp(6f))
         b.elevation = dp(6f).toFloat()
         b.visibility = View.GONE
@@ -1089,7 +1240,14 @@ class MainActivity : ComponentActivity(),
         bannerAllowAlways = bannerButton("Always allow") { allowBlocked(true) }
         b.addView(bannerAllowOnce)
         b.addView(bannerAllowAlways)
-        b.addView(bannerButton("✕") { hideBannerNow() })
+        b.addView(ImageView(this).apply {
+            setImageDrawable(Icon(this@MainActivity, Icon.Kind.CLOSE, Ui.TEXT_DIM, 18f))
+            scaleType = ImageView.ScaleType.CENTER
+            background = Ui.focusable(this@MainActivity, radiusDp = 18f, base = 0x00000000)
+            isFocusable = true
+            contentDescription = "Dismiss"
+            setOnClickListener { hideBannerNow() }
+        }, LinearLayout.LayoutParams(dp(36f), dp(36f)).also { it.marginStart = dp(4f) })
         return b
     }
 
@@ -1097,8 +1255,9 @@ class MainActivity : ComponentActivity(),
         text = label
         setTextColor(Ui.ACCENT)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        typeface = Ui.LABEL
         gravity = Gravity.CENTER
-        setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
+        setPadding(dp(12f), dp(8f), dp(12f), dp(8f))
         background = Ui.focusable(this@MainActivity)
         isFocusable = true
         setOnClickListener { onClick() }
@@ -1112,7 +1271,7 @@ class MainActivity : ComponentActivity(),
         val web = scheme == "http" || scheme == "https"
         val what = url.host ?: scheme ?: "link"
         blockedUrl = if (web) url.toString() else null
-        bannerText.text = (if (popup) "Blocked pop-up: " else "Blocked redirect: ") + what
+        bannerText.text = (if (popup) "Blocked a pop-up to " else "Blocked a redirect to ") + what
         bannerAllowOnce.visibility = if (web) View.VISIBLE else View.GONE
         bannerAllowAlways.visibility = if (web) View.VISIBLE else View.GONE
         banner.visibility = View.VISIBLE

@@ -134,30 +134,23 @@
   // 1. Windows 11 desktop environment
   // =====================================================================================
 
-  function installDesktopEnv() {
-    const ua = (typeof BOOT.ua === 'string' && BOOT.ua) ||
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-    const major = String(BOOT.chromeMajor || (ua.match(/Chrome\/(\d+)/) || [0, '131'])[1]);
-    const full = String(BOOT.chromeFull || (major + '.0.0.0'));
+  // Which desktop browser the page should believe it is talking to.
+  //   chrome / edge : Chromium on Windows 11 (matches the real engine, the safest choice)
+  //   firefox       : Firefox on Windows 11 (no UA client hints, no window.chrome)
+  //   android       : no spoofing at all (the real Android WebView identity)
+  const IDENTITY = ['chrome', 'edge', 'firefox', 'android'].indexOf(BOOT.identity) >= 0 ? BOOT.identity : 'chrome';
+
+  // navigator.userAgentData (UA Client Hints JS API) for the Chromium-based identities.
+  function installUserAgentData(major, full) {
     const NP = Navigator.prototype;
-    const nativeCores = navigator.hardwareConcurrency || 8;
-
-    defineGetter(NP, 'userAgent', () => ua);
-    defineGetter(NP, 'appVersion', () => ua.replace(/^Mozilla\//, ''));
-    defineGetter(NP, 'platform', () => 'Win32');
-    defineGetter(NP, 'vendor', () => 'Google Inc.');
-    defineGetter(NP, 'maxTouchPoints', () => 0);
-    defineGetter(NP, 'hardwareConcurrency', () => Math.max(nativeCores, 8));
-    defineGetter(NP, 'deviceMemory', () => 8);
-
-    // navigator.userAgentData (UA Client Hints JS API)
+    const lead = IDENTITY === 'edge' ? 'Microsoft Edge' : 'Google Chrome';
     const brands = Object.freeze([
-      Object.freeze({ brand: 'Google Chrome', version: major }),
+      Object.freeze({ brand: lead, version: major }),
       Object.freeze({ brand: 'Chromium', version: major }),
       Object.freeze({ brand: 'Not_A Brand', version: '24' })
     ]);
     const fullVersionList = Object.freeze([
-      Object.freeze({ brand: 'Google Chrome', version: full }),
+      Object.freeze({ brand: lead, version: full }),
       Object.freeze({ brand: 'Chromium', version: full }),
       Object.freeze({ brand: 'Not_A Brand', version: '24.0.0.0' })
     ]);
@@ -190,6 +183,54 @@
       toJSON: { value: function toJSON() { return { brands: brands, mobile: false, platform: 'Windows' }; } }
     });
     defineGetter(NP, 'userAgentData', () => uad);
+  }
+
+  function installDesktopEnv() {
+    if (IDENTITY === 'android') return;
+    const ua = (typeof BOOT.ua === 'string' && BOOT.ua) ||
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    const major = String(BOOT.chromeMajor || (ua.match(/Chrome\/(\d+)/) || [0, '131'])[1]);
+    const full = String(BOOT.chromeFull || (major + '.0.0.0'));
+    const NP = Navigator.prototype;
+    const nativeCores = navigator.hardwareConcurrency || 8;
+    const firefox = IDENTITY === 'firefox';
+
+    defineGetter(NP, 'userAgent', () => ua);
+    defineGetter(NP, 'appVersion', () => firefox ? '5.0 (Windows)' : ua.replace(/^Mozilla\//, ''));
+    defineGetter(NP, 'platform', () => 'Win32');
+    defineGetter(NP, 'vendor', () => firefox ? '' : 'Google Inc.');
+    defineGetter(NP, 'maxTouchPoints', () => 0);
+    defineGetter(NP, 'hardwareConcurrency', () => Math.max(nativeCores, 8));
+    if (firefox) {
+      defineGetter(NP, 'oscpu', () => 'Windows NT 10.0; Win64; x64');
+      defineGetter(NP, 'buildID', () => '20181001000000');
+      defineGetter(NP, 'productSub', () => '20100101');
+      // Firefox exposes neither navigator.deviceMemory nor navigator.userAgentData.
+      for (const p of ['deviceMemory', 'userAgentData']) {
+        try { delete NP[p]; } catch (e) { /* ignore */ }
+        try { delete navigator[p]; } catch (e) { /* ignore */ }
+      }
+      try { if (Object.prototype.hasOwnProperty.call(W, 'chrome')) delete W.chrome; } catch (e) { /* ignore */ }
+    } else {
+      defineGetter(NP, 'deviceMemory', () => 8);
+      installUserAgentData(major, full);
+      // Desktop Chrome and Edge always expose window.chrome; Android WebView does not.
+      if (!W.chrome) {
+        const chromeObj = {
+          app: {
+            isInstalled: false,
+            InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+            RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+          },
+          runtime: {},
+          loadTimes: function loadTimes() { return {}; },
+          csi: function csi() { return { startE: Date.now(), onloadT: Date.now(), pageT: performance.now(), tran: 15 }; }
+        };
+        try {
+          Object.defineProperty(W, 'chrome', { value: chromeObj, writable: true, configurable: true, enumerable: true });
+        } catch (e) { /* ignore */ }
+      }
+    }
 
     // matchMedia: a desktop has a fine pointer that can hover and no coarse (touch) pointer.
     // Each pointer/hover feature is rewritten into an always-true or always-false condition so
@@ -1008,6 +1049,27 @@
       // threaded path that then fails, so it is left undefined.
       Status.sab = 'unavailable (WebView blocks posting shared memory to workers)';
     }
+  }
+
+  // A page that sends COOP+COEP (or Document-Isolation-Policy) wants SharedArrayBuffer threads.
+  // Android WebView only grants them to app-allowlisted origins whose document carries
+  // Document-Isolation-Policy, so the page's own headers are read and the app is asked to enable it.
+  const nativeFetch = typeof W.fetch === 'function' ? W.fetch.bind(W) : null;
+  function detectIsolationRequest() {
+    if (W.crossOriginIsolated || !nativeFetch || !/^https?:$/.test(location.protocol)) return;
+    const key = '__radiant_coi_checked';
+    try {
+      if (sessionStorage.getItem(key) === location.pathname) return;
+      sessionStorage.setItem(key, location.pathname);
+    } catch (e) { /* storage blocked: check anyway */ }
+    nativeFetch(location.href, { method: 'HEAD', credentials: 'include', cache: 'no-store' }).then((r) => {
+      const coop = (r.headers.get('cross-origin-opener-policy') || '').toLowerCase();
+      const coep = (r.headers.get('cross-origin-embedder-policy') || '').toLowerCase();
+      const dip = (r.headers.get('document-isolation-policy') || '').toLowerCase();
+      if (/require-corp|credentialless/.test(coep) || /isolate/.test(dip)) {
+        Native.post({ t: 'coi', top: IS_TOP, coop: coop, coep: coep, dip: dip });
+      }
+    }).catch(() => { /* HEAD unsupported or offline: nothing to report */ });
   }
 
   // =====================================================================================
@@ -1928,12 +1990,13 @@
   guard('gamepad api', installGamepadAPI);
   guard('input', installInput);
   guard('native bridge', connectNative);
+  guard('isolation probe', () => setTimeout(detectIsolationRequest, 0));
 
   if (BOOT.exposeInternals) {
     W.__radiantInternals = {
       S: S, Input: Input, Lock: Lock, Status: Status, Display: Display, Native: Native,
       onNativeMessage: onNativeMessage, decodeS3TC: decodeS3TC, S3TC_FORMATS: S3TC_FORMATS,
-      isOwner: isOwner
+      isOwner: isOwner, IDENTITY: IDENTITY
     };
   }
 })();

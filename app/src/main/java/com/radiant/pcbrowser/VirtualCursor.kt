@@ -30,7 +30,7 @@ class CursorOverlayView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeWidth = 2.6f
         strokeJoin = Paint.Join.ROUND
-        color = Color.argb(150, 0, 229, 255)
+        color = Color.argb(170, 139, 124, 255)
     }
     private val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE

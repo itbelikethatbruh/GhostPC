@@ -1,13 +1,14 @@
 package com.radiant.pcbrowser
 
-import android.app.AlertDialog
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Color
-import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
@@ -17,22 +18,18 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
-import android.widget.Switch
 import android.widget.TextView
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import java.util.Locale
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Slide-out command drawer: URL bar, game hub bookmarks, input mode, sensitivity/performance controls,
- * per-button key rebinding and a diagnostics panel. Fully navigable with a controller
- * (D-pad/stick move focus, A activates, B closes).
+ * Slide-out command panel styled like a console quick menu: a tab rail on the left (LB / RB switch
+ * tabs), pages on the right, everything reachable with the D-pad and A / B.
  */
 class CommandDrawer(private val context: Context, private val prefs: Prefs, private val host: Host) {
 
@@ -41,77 +38,109 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         fun goBack()
         fun goForward()
         fun reload()
-        fun goHome()
         fun exitApp()
         fun canGoBack(): Boolean
         fun canGoForward(): Boolean
         fun currentUrl(): String?
-        fun isCurrentSiteAllowed(): Boolean
-        fun allowCurrentSiteAlways()
+        fun siteRedirectState(): Int
+        fun setCurrentSiteAllowed(allowed: Boolean)
+        fun threadsSupported(): Boolean
+        fun isThreadsEnabledForCurrentSite(): Boolean
+        fun setThreadsForCurrentSite(enabled: Boolean)
+        fun threadOrigins(): List<String>
+        fun removeThreadOrigin(origin: String)
         fun onSettingsChanged(reloadPage: Boolean)
+        fun onIdentityChanged()
         fun setCursorEnabled(on: Boolean)
         fun isCursorEnabled(): Boolean
-        fun statusText(): String
+        fun statusItems(): List<StatusItem>
         fun requestCloseDrawer()
     }
 
-    data class Bookmark(val title: String, val url: String)
+    data class Bookmark(val title: String, val monogram: String, val url: String)
+
+    data class StatusItem(val label: String, val value: String, val level: Int)
+
+    private enum class Tab(val label: String, val icon: Icon.Kind) {
+        GAMES("Games", Icon.Kind.GAMES),
+        CONTROLS("Controls", Icon.Kind.GAMEPAD),
+        DISPLAY("Display", Icon.Kind.DISPLAY),
+        BUTTONS("Buttons", Icon.Kind.BUTTONS),
+        STATUS("Status", Icon.Kind.STATUS)
+    }
 
     private val handler = Handler(Looper.getMainLooper())
-    private val refreshers = ArrayList<() -> Unit>()
     private val applyRunnable = Runnable { host.onSettingsChanged(false) }
+    private val refreshers = ArrayList<() -> Unit>()
 
-    /** Full-screen container (scrim + panel). Add to the activity root above the WebView. */
+    /** Full-screen container (scrim + panel). Add it to the activity root above the WebView. */
     val view: FrameLayout = FrameLayout(context)
-    private val panel = LinearLayout(context)
-    private val scroll = ScrollView(context)
+    private val scrim = View(context)
+    private val panel = FrameLayout(context)
+    private val column = LinearLayout(context)
+    private val pagesHost = FrameLayout(context)
+    private val pages = LinkedHashMap<Tab, ScrollView>()
+    private val railItems = LinkedHashMap<Tab, LinearLayout>()
+    private val bindChips = HashMap<Int, TextView>()
+    private var current = Tab.GAMES
+    private var picker: View? = null
+    private var pickerIndex = -1
+
     private lateinit var urlField: EditText
-    private lateinit var backButton: TextView
-    private lateinit var closeButton: TextView
-    private lateinit var forwardButton: TextView
-    private lateinit var siteLabel: TextView
-    private lateinit var allowSiteButton: TextView
-    private lateinit var statusLabel: TextView
+    private lateinit var urlPill: LinearLayout
+    private lateinit var urlIcon: ImageView
+    private lateinit var backButton: ImageView
+    private lateinit var forwardButton: ImageView
+    private lateinit var closeButton: ImageView
+    private lateinit var siteBox: LinearLayout
+    private lateinit var threadListBox: LinearLayout
+    private lateinit var statusBox: LinearLayout
 
     var isOpen = false
         private set
 
     init {
-        val scrim = View(context).apply {
-            setBackgroundColor(Color.argb(110, 0, 0, 0))
-            isClickable = true
-            isFocusable = false
-            setOnClickListener { host.requestCloseDrawer() }
-        }
-        view.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        scrim.setBackgroundColor(Color.argb(110, 6, 3, 14))
+        scrim.isClickable = true
+        scrim.isFocusable = false
+        scrim.setOnClickListener { host.requestCloseDrawer() }
+        view.addView(scrim, matchParent())
 
-        panel.orientation = LinearLayout.VERTICAL
-        val pad = dp(14f)
-        panel.setPadding(pad, pad, pad, dp(40f))
-        scroll.addView(panel, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        scroll.isFillViewport = true
-        scroll.setBackgroundColor(Ui.PANEL)
-        scroll.isClickable = true
-        view.addView(scroll, FrameLayout.LayoutParams(dp(400f), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START))
+        panel.background = Ui.glassPanel(context)
+        panel.isClickable = true
+        view.addView(panel, FrameLayout.LayoutParams(dp(560f), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.START))
 
+        column.orientation = LinearLayout.VERTICAL
+        panel.addView(column, matchParent())
+        column.addView(buildTopBar(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        column.addView(View(context).apply { setBackgroundColor(Ui.HAIRLINE) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+
+        val body = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        column.addView(body, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        body.addView(buildRail(), LinearLayout.LayoutParams(dp(92f), ViewGroup.LayoutParams.MATCH_PARENT))
+        body.addView(pagesHost, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+
+        buildPages()
         view.visibility = View.GONE
-        buildContent()
+        selectTab(Tab.GAMES, animate = false, focus = false)
     }
 
-    // ------------------------------------------------------------------------ public API
+    // ============================================================================ public API
 
-    /** @param fromController leave touch mode and focus the first item so the D-pad works immediately. */
     fun open(fromController: Boolean) {
         if (isOpen) return
         isOpen = true
         val screenW = context.resources.displayMetrics.widthPixels
-        val w = min(dp(420f), (screenW * 0.62f).roundToInt())
-        scroll.layoutParams = (scroll.layoutParams as FrameLayout.LayoutParams).also { it.width = w }
+        val w = min(dp(620f), (screenW * 0.7f).roundToInt())
+        panel.layoutParams = (panel.layoutParams as FrameLayout.LayoutParams).also { it.width = w }
         refresh()
         view.visibility = View.VISIBLE
-        scroll.translationX = -w.toFloat()
-        scroll.animate().translationX(0f).setDuration(180).start()
-        // The close button is never disabled, so it can always take focus (Back may be disabled).
+        panel.translationX = -w.toFloat()
+        panel.alpha = 0.6f
+        panel.animate().translationX(0f).alpha(1f).setDuration(200).start()
+        scrim.alpha = 0f
+        scrim.animate().alpha(1f).setDuration(200).start()
         view.post { if (fromController) focusFirst() else closeButton.requestFocus() }
     }
 
@@ -119,20 +148,35 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         if (!isOpen) return
         isOpen = false
         handler.removeCallbacks(applyRunnable)
-        val imm = context.getSystemService(InputMethodManager::class.java)
-        imm?.hideSoftInputFromWindow(urlField.windowToken, 0)
+        closePicker(false)
+        context.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(urlField.windowToken, 0)
         urlField.clearFocus()
-        scroll.animate().translationX(-scroll.width.toFloat()).setDuration(150).withEndAction {
+        panel.animate().translationX(-panel.width.toFloat()).alpha(0.6f).setDuration(160).withEndAction {
             if (!isOpen) view.visibility = View.GONE
         }.start()
+        scrim.animate().alpha(0f).setDuration(160).start()
     }
 
-    /** Leaves touch mode and puts focus on the first item, so the D-pad and A work right away. */
+    /** B / Back inside the panel: closes the key picker first, then the panel. */
+    fun handleBack(): Boolean {
+        if (picker != null) {
+            closePicker(true)
+            return true
+        }
+        return false
+    }
+
+    fun cycleTab(direction: Int) {
+        val values = Tab.values()
+        val next = values[(current.ordinal + direction + values.size) % values.size]
+        selectTab(next, animate = true, focus = true)
+    }
+
+    /** Leaves touch mode and focuses the active tab, so the D-pad and A work right away. */
     fun focusFirst() {
-        closeButton.requestFocusFromTouch()
+        railItems[current]?.requestFocusFromTouch()
     }
 
-    /** True when [v] is part of the drawer's view tree. */
     fun contains(v: View?): Boolean {
         var cur: View? = v
         while (cur != null) {
@@ -143,65 +187,69 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
     }
 
     fun setInsets(left: Int, top: Int, bottom: Int) {
-        val pad = dp(14f)
-        panel.setPadding(pad + left, pad + top, pad, dp(40f) + bottom)
+        column.setPadding(left, top, 0, bottom)
     }
 
     fun onUrlChanged(url: String?) {
         if (!urlField.hasFocus()) urlField.setText(url ?: "")
-        refreshSite()
+        val secure = url?.startsWith("https://") == true
+        urlIcon.setImageDrawable(Icon(context, if (secure) Icon.Kind.LOCK else Icon.Kind.GLOBE, Ui.TEXT_DIM, 16f))
+        if (isOpen) {
+            refreshNav()
+            refreshSite()
+        }
     }
 
     fun refresh() {
         urlField.setText(host.currentUrl() ?: "")
         for (r in refreshers) r()
+        refreshNav()
         refreshSite()
+        refreshThreadList()
         refreshStatus()
     }
 
     fun refreshStatus() {
-        if (isOpen) statusLabel.text = host.statusText()
+        if (!isOpen) return
+        statusBox.removeAllViews()
+        for (item in host.statusItems()) statusBox.addView(statusRow(item))
     }
 
-    // ------------------------------------------------------------------------ content
+    // ============================================================================ top bar + rail
 
-    private fun buildContent() {
-        // Header
-        val header = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header.addView(TextView(context).apply {
-            text = "Radiant PC Game Browser"
-            setTextColor(Ui.TEXT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            typeface = Typeface.DEFAULT_BOLD
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        closeButton = chip("✕") { host.requestCloseDrawer() }
-        header.addView(closeButton, LinearLayout.LayoutParams(dp(44f), dp(40f)))
-        panel.addView(header)
+    private fun buildTopBar(): View {
+        val bar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10f), dp(10f), dp(12f), dp(10f))
+        }
+        backButton = iconButton(Icon.Kind.BACK, "Back") { host.goBack(); refreshNav() }
+        forwardButton = iconButton(Icon.Kind.FORWARD, "Forward") { host.goForward(); refreshNav() }
+        bar.addView(backButton)
+        bar.addView(forwardButton)
+        bar.addView(iconButton(Icon.Kind.RELOAD, "Reload") { host.reload(); host.requestCloseDrawer() })
 
-        // Navigation row
-        val nav = row()
-        backButton = chip("◀ Back") { host.goBack(); refreshNav() }
-        forwardButton = chip("▶") { host.goForward(); refreshNav() }
-        nav.addView(backButton, weighted(1.4f))
-        nav.addView(forwardButton, weighted(0.8f))
-        nav.addView(chip("⟳ Reload") { host.reload(); host.requestCloseDrawer() }, weighted(1.4f))
-        nav.addView(chip("⌂ Home") { host.goHome() }, weighted(1.2f))
-        nav.addView(chip("Exit") { host.exitApp() }, weighted(1f))
-        panel.addView(nav, topMargin(10f))
-        refreshers.add { refreshNav() }
-
-        // URL bar
-        val urlRow = row()
+        urlPill = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.rounded(context, Ui.SURFACE, 22f)
+            setPadding(dp(14f), 0, dp(4f), 0)
+        }
+        urlIcon = ImageView(context).apply { setImageDrawable(Icon(context, Icon.Kind.GLOBE, Ui.TEXT_DIM, 16f)) }
+        urlPill.addView(urlIcon, LinearLayout.LayoutParams(dp(16f), dp(16f)))
         urlField = EditText(context).apply {
+            background = null
             setSingleLine(true)
-            hint = "Enter a game URL or search"
-            setHintTextColor(Ui.TEXT_DIM)
+            ellipsize = TextUtils.TruncateAt.END
+            hint = "Search or type a game address"
+            setHintTextColor(Ui.TEXT_FAINT)
             setTextColor(Ui.TEXT)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Ui.BODY
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             imeOptions = EditorInfo.IME_ACTION_GO or EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN
-            background = Ui.focusable(context)
-            setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
+            setSelectAllOnFocus(true)
+            setPadding(dp(10f), 0, dp(4f), 0)
             setOnEditorActionListener { v, actionId, event ->
                 val enter = event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
                 if (actionId == EditorInfo.IME_ACTION_GO || enter) {
@@ -211,275 +259,739 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
                     false
                 }
             }
-        }
-        urlRow.addView(urlField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        urlRow.addView(chip("Go") { host.navigate(urlField.text.toString()) }, LinearLayout.LayoutParams(dp(56f), dp(44f)).also { it.marginStart = dp(6f) })
-        panel.addView(urlRow, topMargin(8f))
-
-        // Bookmarks
-        section("Game hubs")
-        for (b in BOOKMARKS) {
-            val t = chip(b.title) { host.navigate(b.url) }
-            t.gravity = Gravity.CENTER_VERTICAL or Gravity.START
-            t.text = b.title + "\n" + (Uri.parse(b.url).host ?: b.url)
-            t.setLineSpacing(0f, 1.05f)
-            panel.addView(t, topMargin(5f))
-        }
-
-        // This site
-        section("This site")
-        siteLabel = TextView(context).apply { setTextColor(Ui.TEXT_DIM); setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f) }
-        panel.addView(siteLabel)
-        allowSiteButton = chip("Always allow redirects/pop-ups on this site") {
-            host.allowCurrentSiteAlways()
-            refreshSite()
-        }
-        panel.addView(allowSiteButton, topMargin(6f))
-
-        // Input
-        section("Controller output")
-        panel.addView(segmented(
-            listOf(Prefs.MODE_KBM to "PC Keyboard + Mouse", Prefs.MODE_PAD to "XInput Gamepad", Prefs.MODE_HYBRID to "Hybrid (both)"),
-            { prefs.mode },
-            { prefs.mode = it; host.onSettingsChanged(false) }
-        ))
-        hint("Keyboard + Mouse: FPS / Quake / CS / Half-Life / Zombies. XInput: games with native controller support (GTA III, Skate 3, PES 6, Halo CE).")
-        panel.addView(toggle("Virtual mouse cursor (L3 + R3)", { host.isCursorEnabled() }, { host.setCursorEnabled(it) }), topMargin(8f))
-        panel.addView(toggle("Show cursor automatically in menus", { prefs.autoCursor }, { prefs.autoCursor = it; host.onSettingsChanged(false) }))
-        panel.addView(toggle("On-screen touch gamepad", { prefs.touchGamepad }, { prefs.touchGamepad = it; host.onSettingsChanged(false) }))
-        panel.addView(toggle("D-pad sends arrow keys (instead of 1-4)", { prefs.dpadArrows }, { prefs.dpadArrows = it; host.onSettingsChanged(false) }))
-
-        section("Sensitivity")
-        panel.addView(slider("Look sensitivity", 0.1f, 4f, 0.05f, { prefs.lookSensitivity }, { prefs.lookSensitivity = it },
-            { String.format(Locale.US, "%.2f×", it) }))
-        panel.addView(slider("Stick deadzone", 0.02f, 0.5f, 0.01f, { prefs.deadzone }, { prefs.deadzone = it },
-            { String.format(Locale.US, "%d%%", (it * 100).roundToInt()) }))
-        panel.addView(slider("Cursor speed", 0.3f, 3f, 0.05f, { prefs.cursorSpeed }, { prefs.cursorSpeed = it },
-            { String.format(Locale.US, "%.2f×", it) }))
-
-        section("Performance")
-        panel.addView(segmented(
-            listOf("1.0" to "100% Native", "0.75" to "75% High FPS", "0.5" to "50% Ultra FPS"),
-            { String.format(Locale.US, "%s", trimScale(prefs.resolutionScale)) },
-            { prefs.resolutionScale = it.toFloat(); host.onSettingsChanged(false) }
-        ))
-        hint("Scales the canvas resolution games compute from devicePixelRatio. Games with a fixed canvas size ignore it; reload if a game does not react.")
-        panel.addView(segmented(
-            listOf("0" to "Phone width", "1280" to "Desktop 1280", "1600" to "Desktop 1600"),
-            { prefs.desktopViewport.toString() },
-            { prefs.desktopViewport = it.toInt(); host.onSettingsChanged(true) }
-        ), topMargin(8f))
-        hint("Desktop width lays pages out like a 1280/1600 px wide PC window (reloads the page).")
-
-        section("Button bindings (PC Keyboard + Mouse mode)")
-        for (i in 0 until ControllerManager.BUTTONS) {
-            val r = row()
-            r.gravity = Gravity.CENTER_VERTICAL
-            r.addView(TextView(context).apply {
-                text = Prefs.BUTTON_NAMES[i]
-                setTextColor(Ui.TEXT)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.9f))
-            val b = chip("") { pickBinding(i) }
-            r.addView(b, LinearLayout.LayoutParams(0, dp(40f), 1.1f))
-            refreshers.add {
-                val id = prefs.binds[i] ?: "None"
-                b.text = when {
-                    i in 12..15 && prefs.dpadArrows -> "Arrow keys (D-pad mode)"
-                    i == 16 -> "Opens this drawer"
-                    else -> BindTargets.label(id)
-                }
+            setOnFocusChangeListener { _, has ->
+                urlPill.background = if (has) Ui.rounded(context, Ui.SURFACE_HI, 22f, Ui.ACCENT, 1.5f)
+                else Ui.rounded(context, Ui.SURFACE, 22f)
             }
-            panel.addView(r, topMargin(4f))
         }
-        panel.addView(chip("Reset bindings to defaults") {
-            prefs.resetBinds()
-            refresh()
-            host.onSettingsChanged(false)
-        }, topMargin(8f))
-
-        section("Status")
-        statusLabel = TextView(context).apply {
-            setTextColor(Ui.TEXT_DIM)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            setLineSpacing(0f, 1.15f)
-            setTextIsSelectable(false)
-        }
-        panel.addView(statusLabel)
-
-        section("Controller shortcuts")
-        hint(
-            "Select + Start (or Guide): open / close this drawer\n" +
-                "L3 + R3: toggle the virtual mouse cursor\n" +
-                "Cursor mode: sticks move, A / RT click (hold to drag), LB / RB scroll, B / Start = Esc, Y = Enter, X = Backspace, D-pad = arrows\n" +
-                "Game mode: Start tap = Esc (releases the mouse first), Start hold = Enter\n" +
-                "Android Back button: open / close this drawer"
-        )
+        urlPill.addView(urlField, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        urlPill.addView(iconButton(Icon.Kind.CHEVRON, "Go", 36f) { host.navigate(urlField.text.toString()) })
+        bar.addView(urlPill, LinearLayout.LayoutParams(0, dp(44f), 1f).also {
+            it.marginStart = dp(8f)
+            it.marginEnd = dp(8f)
+        })
+        closeButton = iconButton(Icon.Kind.CLOSE, "Close menu") { host.requestCloseDrawer() }
+        bar.addView(closeButton)
+        return bar
     }
 
-    private fun refreshNav() {
-        backButton.isEnabled = host.canGoBack()
-        backButton.alpha = if (backButton.isEnabled) 1f else 0.45f
-        forwardButton.isEnabled = host.canGoForward()
-        forwardButton.alpha = if (forwardButton.isEnabled) 1f else 0.45f
+    private fun buildRail(): View {
+        val rail = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8f), dp(8f), dp(8f), dp(8f))
+        }
+        for (tab in Tab.values()) {
+            val item = railItem(tab.icon, tab.label) { selectTab(tab, animate = true, focus = false) }
+            railItems[tab] = item
+            rail.addView(item, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54f)).also {
+                it.bottomMargin = dp(3f)
+            })
+        }
+        // Scrolls on very short screens instead of cutting tabs off.
+        return ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setBackgroundColor(Ui.RAIL)
+            addView(rail)
+        }
+    }
+
+    private fun railItem(kind: Icon.Kind, label: String, onClick: () -> Unit): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = Ui.railItem(context, false)
+            isFocusable = true
+            isClickable = true
+            contentDescription = label
+            setOnClickListener { onClick() }
+            addView(ImageView(context).apply { setImageDrawable(Icon(context, kind, Ui.TEXT_DIM, 21f)) },
+                LinearLayout.LayoutParams(dp(21f), dp(21f)))
+            addView(TextView(context).apply {
+                text = label
+                setTextColor(Ui.TEXT_DIM)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                typeface = Ui.LABEL
+                gravity = Gravity.CENTER
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+                it.topMargin = dp(3f)
+            })
+        }
+
+    private fun selectTab(tab: Tab, animate: Boolean, focus: Boolean) {
+        closePicker(false)
+        val previous = current
+        current = tab
+        for ((t, item) in railItems) {
+            val sel = t == tab
+            item.background = Ui.railItem(context, sel)
+            ((item.getChildAt(0) as ImageView).drawable as? Icon)?.color = if (sel) Ui.TEXT else Ui.TEXT_DIM
+            (item.getChildAt(1) as TextView).setTextColor(if (sel) Ui.TEXT else Ui.TEXT_DIM)
+        }
+        for ((t, page) in pages) {
+            if (t != tab) {
+                page.visibility = View.GONE
+                continue
+            }
+            page.visibility = View.VISIBLE
+            if (animate && t != previous) {
+                page.alpha = 0f
+                page.translationY = dp(10f).toFloat()
+                page.animate().alpha(1f).translationY(0f).setDuration(170).start()
+            }
+        }
+        if (tab == Tab.STATUS) refreshStatus()
+        if (focus) railItems[tab]?.requestFocus()
+    }
+
+    // ============================================================================ pages
+
+    private fun buildPages() {
+        for (tab in Tab.values()) {
+            val col = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(18f), dp(14f), dp(22f), dp(28f))
+            }
+            when (tab) {
+                Tab.GAMES -> buildGames(col)
+                Tab.CONTROLS -> buildControls(col)
+                Tab.DISPLAY -> buildDisplay(col)
+                Tab.BUTTONS -> buildButtons(col)
+                Tab.STATUS -> buildStatus(col)
+            }
+            val scroll = ScrollView(context).apply {
+                isVerticalScrollBarEnabled = false
+                overScrollMode = View.OVER_SCROLL_NEVER
+                addView(col)
+                visibility = View.GONE
+            }
+            pages[tab] = scroll
+            pagesHost.addView(scroll, matchParent())
+        }
+    }
+
+    private fun buildGames(col: LinearLayout) {
+        pageTitle(col, "Games", null)
+        siteBox = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.rounded(context, Ui.SURFACE, 18f, Ui.HAIRLINE, 1f)
+            setPadding(dp(14f), dp(14f), dp(14f), dp(10f))
+        }
+        col.addView(siteBox, lp(top = 12f))
+        section(col, "Game hubs")
+        var row: LinearLayout? = null
+        BOOKMARKS.forEachIndexed { i, b ->
+            if (i % 2 == 0) {
+                row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                col.addView(row, lp(top = 8f))
+            }
+            row?.addView(tile(b), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
+                if (i % 2 == 0) it.marginEnd = dp(8f)
+            })
+        }
+        if (BOOKMARKS.size % 2 == 1) row?.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
     }
 
     private fun refreshSite() {
-        val url = host.currentUrl()
-        val siteHost = url?.let { Uri.parse(it).host } ?: ""
-        val allowed = host.isCurrentSiteAllowed()
-        siteLabel.text = if (siteHost.isEmpty()) "No page loaded" else if (allowed) "$siteHost (allowed)" else "$siteHost (redirect shield active)"
-        allowSiteButton.visibility = if (siteHost.isEmpty() || allowed) View.GONE else View.VISIBLE
+        siteBox.removeAllViews()
+        val uri = host.currentUrl()?.let { Uri.parse(it) }
+        val siteHost = uri?.host
+        if (uri == null || siteHost.isNullOrEmpty()) {
+            siteBox.addView(body("Nothing open yet. Pick a game hub below or type an address above."))
+            return
+        }
+        val head = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(ImageView(context).apply {
+            setImageDrawable(Icon(context, if (uri.scheme == "https") Icon.Kind.LOCK else Icon.Kind.GLOBE, Ui.TEXT_DIM, 18f))
+        }, LinearLayout.LayoutParams(dp(18f), dp(18f)))
+        head.addView(TextView(context).apply {
+            text = siteHost
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            typeface = Ui.TITLE
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginStart = dp(10f) })
+        siteBox.addView(head)
+        val path = (uri.encodedPath ?: "") + (uri.encodedQuery?.let { "?$it" } ?: "")
+        if (path.length > 1) {
+            siteBox.addView(TextView(context).apply {
+                text = path
+                setTextColor(Ui.TEXT_FAINT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.MIDDLE
+            }, lp(top = 2f))
+        }
+
+        val redirect = host.siteRedirectState()
+        val builtIn = redirect == SITE_BUILT_IN
+        siteBox.addView(toggleRow(
+            "Allow redirects and pop-ups",
+            if (builtIn) "Built-in game site, always allowed" else "When off, only links you tap can leave this site",
+            get = { redirect != SITE_SHIELDED },
+            set = { host.setCurrentSiteAllowed(it); refreshSite() },
+            enabled = !builtIn,
+            register = false,
+            flat = true
+        ), lp(top = 10f))
+
+        val threadsOk = host.threadsSupported()
+        siteBox.addView(toggleRow(
+            "Multithreading",
+            if (threadsOk) "Gives the site shared memory for multithreaded games. Reloads the page."
+            else "Needs a newer Android System WebView. Update it from the Play Store.",
+            get = { threadsOk && host.isThreadsEnabledForCurrentSite() },
+            set = { host.setThreadsForCurrentSite(it); refreshSite(); refreshThreadList() },
+            enabled = threadsOk,
+            register = false,
+            flat = true
+        ))
     }
 
-    private fun pickBinding(index: Int) {
-        if (index == 16 || (index in 12..15 && prefs.dpadArrows)) return
-        val targets = BindTargets.ALL
-        val current = prefs.binds[index] ?: "None"
-        val dialog = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Bind " + Prefs.BUTTON_NAMES[index])
-            .setItems(targets.map { it.label }.toTypedArray()) { _, which ->
-                prefs.setBind(index, targets[which].id)
-                refresh()
+    private fun buildControls(col: LinearLayout) {
+        pageTitle(col, "Controls", null)
+        section(col, "Controller output")
+        val modes = listOf(
+            Triple(Prefs.MODE_KBM, "Keyboard and mouse", "Sticks become WASD and mouse look. Best for shooters and anything with menus."),
+            Triple(Prefs.MODE_PAD, "Xbox controller", "The game sees an XInput gamepad. Use it for games with built-in controller support."),
+            Triple(Prefs.MODE_HYBRID, "Both", "Sends keyboard, mouse and gamepad input at the same time.")
+        )
+        for ((value, title, desc) in modes) {
+            col.addView(optionCard(title, desc, { prefs.mode == value }) {
+                prefs.mode = value
                 host.onSettingsChanged(false)
-            }
-            .setNegativeButton("Cancel", null)
-            .create()
-        dialog.setOnKeyListener { d, keyCode, event ->
-            when (keyCode) {
-                KeyEvent.KEYCODE_BUTTON_A -> {
-                    if (event.action == KeyEvent.ACTION_UP) {
-                        val list = dialog.listView
-                        val selected = list?.selectedView
-                        if (list != null && selected != null) list.performItemClick(selected, list.selectedItemPosition, list.selectedItemId)
-                    }
-                    true
-                }
-                KeyEvent.KEYCODE_BUTTON_B -> {
-                    if (event.action == KeyEvent.ACTION_UP) d.dismiss()
-                    true
-                }
-                else -> false
-            }
+                for (r in refreshers) r()
+            }, lp(top = 8f))
         }
-        dialog.show()
-        dialog.window?.let { w ->
-            val c = WindowCompat.getInsetsController(w, w.decorView)
-            c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            c.hide(WindowInsetsCompat.Type.systemBars())
-        }
-        val pos = targets.indexOfFirst { it.id == current }
-        if (pos >= 0) dialog.listView?.setSelection(pos)
+
+        section(col, "Cursor and touch")
+        col.addView(toggleRow("Mouse cursor", "Also toggles with L3 + R3",
+            get = { host.isCursorEnabled() }, set = { host.setCursorEnabled(it) }), lp(top = 8f))
+        col.addView(toggleRow("Show the cursor in menus", "Appears whenever the game lets go of the mouse",
+            get = { prefs.autoCursor }, set = { prefs.autoCursor = it; host.onSettingsChanged(false) }), lp(top = 6f))
+        col.addView(toggleRow("On-screen gamepad", "Touch controls drawn over the game",
+            get = { prefs.touchGamepad }, set = { prefs.touchGamepad = it; host.onSettingsChanged(false) }), lp(top = 6f))
+        col.addView(toggleRow("D-pad sends arrow keys", "When off, the D-pad sends 1, 2, 3 and 4",
+            get = { prefs.dpadArrows }, set = { prefs.dpadArrows = it; host.onSettingsChanged(false) }), lp(top = 6f))
+
+        section(col, "Feel")
+        col.addView(slider("Look sensitivity", 0.1f, 4f, 0.05f, { prefs.lookSensitivity }, { prefs.lookSensitivity = it },
+            { String.format(Locale.US, "%.2f×", it) }), lp(top = 8f))
+        col.addView(slider("Stick deadzone", 0.02f, 0.5f, 0.01f, { prefs.deadzone }, { prefs.deadzone = it },
+            { String.format(Locale.US, "%d%%", (it * 100).roundToInt()) }), lp(top = 6f))
+        col.addView(slider("Cursor speed", 0.3f, 3f, 0.05f, { prefs.cursorSpeed }, { prefs.cursorSpeed = it },
+            { String.format(Locale.US, "%.2f×", it) }), lp(top = 6f))
     }
 
-    // ------------------------------------------------------------------------ widgets
+    private fun buildDisplay(col: LinearLayout) {
+        pageTitle(col, "Display", null)
+        section(col, "Resolution")
+        col.addView(segmented(
+            listOf("1.0" to "100%", "0.75" to "75%", "0.5" to "50%"),
+            { trimScale(prefs.resolutionScale) },
+            { prefs.resolutionScale = it.toFloat(); host.onSettingsChanged(false) }
+        ), lp(top = 8f))
+        note(col, "Lower renders fewer pixels and runs faster. Reload if a game keeps its old size.")
+
+        section(col, "Page width")
+        col.addView(segmented(
+            listOf("0" to "Phone", "1280" to "1280 px", "1600" to "1600 px"),
+            { prefs.desktopViewport.toString() },
+            { prefs.desktopViewport = it.toInt(); host.onSettingsChanged(true) }
+        ), lp(top = 8f))
+        note(col, "Lays pages out like a desktop window of that width. Reloads the page.")
+
+        section(col, "Browser identity")
+        col.addView(segmented(
+            listOf(Prefs.IDENTITY_CHROME to "Chrome", Prefs.IDENTITY_EDGE to "Edge",
+                Prefs.IDENTITY_FIREFOX to "Firefox", Prefs.IDENTITY_ANDROID to "Android"),
+            { prefs.identity },
+            { prefs.identity = it; host.onIdentityChanged() }
+        ), lp(top = 8f))
+        note(col, "What sites are told this browser is, all on Windows 11 except Android. Chrome matches the real engine and works best. Reloads the page.")
+
+        section(col, "Multithreading")
+        col.addView(toggleRow("Turn on when a site asks", "Sites that request shared memory get it and reload once",
+            get = { prefs.autoThreads }, set = { prefs.autoThreads = it }), lp(top = 8f))
+        threadListBox = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(threadListBox, lp(top = 6f))
+    }
+
+    private fun refreshThreadList() {
+        threadListBox.removeAllViews()
+        val origins = host.threadOrigins().sorted()
+        if (origins.isEmpty()) {
+            threadListBox.addView(body("No sites have multithreading yet."))
+            return
+        }
+        for (origin in origins) {
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14f), dp(2f), dp(4f), dp(2f))
+                background = Ui.rounded(context, Ui.SURFACE, 14f)
+            }
+            row.addView(ImageView(context).apply { setImageDrawable(Icon(context, Icon.Kind.THREADS, Ui.ACCENT, 18f)) },
+                LinearLayout.LayoutParams(dp(18f), dp(18f)))
+            row.addView(TextView(context).apply {
+                text = Uri.parse(origin).host ?: origin
+                setTextColor(Ui.TEXT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginStart = dp(10f) })
+            row.addView(iconButton(Icon.Kind.CLOSE, "Remove " + origin, 40f) {
+                host.removeThreadOrigin(origin)
+                refreshThreadList()
+                refreshSite()
+            })
+            threadListBox.addView(row, lp(top = 6f))
+        }
+    }
+
+    private fun buildButtons(col: LinearLayout) {
+        pageTitle(col, "Buttons", "Keyboard and mouse mode. Choose a binding to change it.")
+        for (i in 0 until ControllerManager.BUTTONS) {
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val glyphBox = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            glyphBox.addView(buttonGlyph(i))
+            glyphBox.addView(TextView(context).apply {
+                text = PLAYSTATION_NAMES[i]
+                setTextColor(Ui.TEXT_FAINT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+                it.marginStart = dp(8f)
+            })
+            row.addView(glyphBox, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.85f))
+            val chip = chip("") { openPicker(i) }
+            chip.gravity = Gravity.CENTER_VERTICAL or Gravity.START
+            bindChips[i] = chip
+            row.addView(chip, LinearLayout.LayoutParams(0, dp(42f), 1.15f))
+            refreshers.add {
+                val id = prefs.binds[i] ?: "None"
+                val fixed = i == 16 || (i in 12..15 && prefs.dpadArrows)
+                chip.text = when {
+                    i in 12..15 && prefs.dpadArrows -> "Arrow keys"
+                    i == 16 -> "Opens this menu"
+                    else -> BindTargets.label(id)
+                }
+                chip.isEnabled = !fixed
+                chip.alpha = if (fixed) 0.55f else 1f
+            }
+            col.addView(row, lp(top = 6f))
+        }
+        col.addView(chip("Reset all bindings") {
+            prefs.resetBinds()
+            for (r in refreshers) r()
+            host.onSettingsChanged(false)
+        }, lp(top = 14f))
+    }
+
+    private fun buildStatus(col: LinearLayout) {
+        pageTitle(col, "Status", null)
+        statusBox = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(statusBox, lp(top = 6f))
+        section(col, "Shortcuts")
+        val shortcuts = listOf(
+            listOf("Select", "Start") to "Open or close this menu",
+            listOf("L3", "R3") to "Show or hide the mouse cursor",
+            listOf("Start") to "Tap for Esc, hold for Enter",
+            listOf("LB", "RB") to "Switch tabs in this menu",
+            listOf("B") to "Back out of this menu"
+        )
+        for ((keys, what) in shortcuts) {
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(6f), 0, dp(6f))
+            }
+            val glyphs = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+            keys.forEachIndexed { k, key ->
+                if (k > 0) glyphs.addView(TextView(context).apply {
+                    text = "+"
+                    setTextColor(Ui.TEXT_FAINT)
+                    setPadding(dp(5f), 0, dp(5f), 0)
+                })
+                glyphs.addView(glyph(key, small = false))
+            }
+            row.addView(glyphs, LinearLayout.LayoutParams(dp(150f), ViewGroup.LayoutParams.WRAP_CONTENT))
+            row.addView(body(what), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            col.addView(row)
+        }
+        col.addView(chip("Close the app") { host.exitApp() }, lp(top = 18f))
+    }
+
+    // ============================================================================ key picker
+
+    private fun openPicker(index: Int) {
+        if (index == 16 || (index in 12..15 && prefs.dpadArrows)) return
+        closePicker(false)
+        pickerIndex = index
+        val current = prefs.binds[index] ?: "None"
+        val overlay = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Ui.NIGHT)
+            isClickable = true
+        }
+        val head = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10f), dp(10f), dp(18f), dp(6f))
+        }
+        head.addView(iconButton(Icon.Kind.BACK, "Back to buttons") { closePicker(true) })
+        head.addView(TextView(context).apply {
+            text = "Bind"
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            typeface = Ui.DISPLAY
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+            it.marginStart = dp(6f)
+            it.marginEnd = dp(10f)
+        })
+        head.addView(buttonGlyph(index))
+        overlay.addView(head)
+
+        val grid = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18f), dp(4f), dp(22f), dp(28f))
+        }
+        var focusTarget: View? = null
+        val groups = listOf(
+            "Mouse and actions" to BindTargets.ALL.take(9),
+            "Keyboard" to BindTargets.ALL.drop(9)
+        )
+        for ((title, targets) in groups) {
+            section(grid, title)
+            var row: LinearLayout? = null
+            targets.forEachIndexed { i, t ->
+                if (i % 3 == 0) {
+                    row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                    grid.addView(row, lp(top = 6f))
+                }
+                val selected = t.id == current
+                val c = chip(t.label, selected) {
+                    prefs.setBind(index, t.id)
+                    for (r in refreshers) r()
+                    host.onSettingsChanged(false)
+                    closePicker(true)
+                }
+                c.maxLines = 2
+                if (selected) focusTarget = c
+                row?.addView(c, LinearLayout.LayoutParams(0, dp(46f), 1f).also { it.marginEnd = dp(6f) })
+            }
+            val leftover = targets.size % 3
+            if (leftover != 0) repeat(3 - leftover) {
+                row?.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f).also { it.marginEnd = dp(6f) })
+            }
+        }
+        val scroll = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(grid)
+        }
+        overlay.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        pagesHost.addView(overlay, matchParent())
+        picker = overlay
+        overlay.alpha = 0f
+        overlay.animate().alpha(1f).setDuration(140).start()
+        val target = focusTarget
+        overlay.post { (target ?: head.getChildAt(0)).requestFocus() }
+    }
+
+    private fun closePicker(restoreFocus: Boolean) {
+        val p = picker ?: return
+        picker = null
+        pagesHost.removeView(p)
+        if (restoreFocus) bindChips[pickerIndex]?.requestFocus()
+        pickerIndex = -1
+    }
+
+    // ============================================================================ widgets
 
     private fun dp(v: Float): Int = Ui.dp(context, v)
 
-    private fun row(): LinearLayout = LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-    }
+    private fun matchParent() = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
 
-    private fun weighted(w: Float) = LinearLayout.LayoutParams(0, dp(42f), w).also { it.marginEnd = dp(5f) }
-
-    private fun topMargin(v: Float) = LinearLayout.LayoutParams(
+    private fun lp(top: Float = 0f) = LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-    ).also { it.topMargin = dp(v) }
+    ).also { it.topMargin = dp(top) }
 
-    private fun section(title: String) {
-        panel.addView(TextView(context).apply {
-            text = title.uppercase(Locale.ROOT)
-            setTextColor(Ui.ACCENT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            letterSpacing = 0.08f
-            typeface = Typeface.DEFAULT_BOLD
-        }, topMargin(18f))
+    private fun pageTitle(col: LinearLayout, title: String, subtitle: String?) {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(TextView(context).apply {
+            text = title
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 23f)
+            typeface = Ui.DISPLAY
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        // Controller hint: the shoulder buttons flip between these tabs.
+        row.addView(glyph("LB", small = true))
+        row.addView(glyph("RB", small = true).also {
+            (it.layoutParams as LinearLayout.LayoutParams).marginStart = dp(4f)
+        })
+        col.addView(row)
+        if (subtitle != null) col.addView(body(subtitle), lp(top = 2f))
     }
 
-    private fun hint(text: String) {
-        panel.addView(TextView(context).apply {
+    private fun section(col: LinearLayout, title: String) {
+        col.addView(TextView(context).apply {
+            text = title
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+            typeface = Ui.TITLE
+        }, lp(top = 22f))
+    }
+
+    private fun note(col: LinearLayout, text: String) {
+        col.addView(TextView(context).apply {
             this.text = text
             setTextColor(Ui.TEXT_DIM)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setLineSpacing(0f, 1.1f)
-        }, topMargin(4f))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            setLineSpacing(0f, 1.15f)
+        }, lp(top = 6f))
     }
 
-    private fun chip(label: String, onClick: () -> Unit): TextView = TextView(context).apply {
+    private fun body(text: String): TextView = TextView(context).apply {
+        this.text = text
+        setTextColor(Ui.TEXT_DIM)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setLineSpacing(0f, 1.15f)
+    }
+
+    private fun iconButton(kind: Icon.Kind, description: String, sizeDp: Float = 44f, onClick: () -> Unit): ImageView =
+        ImageView(context).apply {
+            setImageDrawable(Icon(context, kind, Ui.TEXT, 20f))
+            scaleType = ImageView.ScaleType.CENTER
+            background = Ui.focusable(context, radiusDp = sizeDp / 2f, base = 0x00000000)
+            contentDescription = description
+            isFocusable = true
+            isClickable = true
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        }
+
+    private fun chip(label: String, selected: Boolean = false, onClick: () -> Unit): TextView = TextView(context).apply {
         text = label
-        setTextColor(Ui.TEXT)
+        setTextColor(if (selected) Color.WHITE else Ui.TEXT)
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+        typeface = Ui.LABEL
         gravity = Gravity.CENTER
         minHeight = dp(40f)
-        setPadding(dp(12f), dp(8f), dp(12f), dp(8f))
-        background = Ui.focusable(context)
-        isClickable = true
+        setPadding(dp(14f), dp(6f), dp(14f), dp(6f))
+        background = Ui.focusable(context, selected, 12f)
         isFocusable = true
+        isClickable = true
         setOnClickListener { onClick() }
     }
 
-    private fun segmented(options: List<Pair<String, String>>, selected: () -> String, onPick: (String) -> Unit): LinearLayout {
-        val r = row()
-        val chips = ArrayList<Pair<String, TextView>>()
-        for ((value, label) in options) {
-            val c = chip(label) {
-                onPick(value)
-                refresh()
+    private fun tile(b: Bookmark): View {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.focusable(context, radiusDp = 16f)
+            setPadding(dp(10f), dp(10f), dp(12f), dp(10f))
+            isFocusable = true
+            isClickable = true
+            contentDescription = b.title
+            setOnClickListener { host.navigate(b.url) }
+        }
+        row.addView(TextView(context).apply {
+            text = b.monogram
+            typeface = Ui.DISPLAY
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = Ui.monogram(context, b.url)
+        }, LinearLayout.LayoutParams(dp(44f), dp(44f)))
+        val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(TextView(context).apply {
+            text = b.title
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Ui.LABEL
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        texts.addView(TextView(context).apply {
+            text = Uri.parse(b.url).host ?: b.url
+            setTextColor(Ui.TEXT_FAINT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginStart = dp(12f) })
+        return row
+    }
+
+    private fun toggleRow(
+        title: String,
+        subtitle: String,
+        get: () -> Boolean,
+        set: (Boolean) -> Unit,
+        enabled: Boolean = true,
+        register: Boolean = true,
+        flat: Boolean = false
+    ): View {
+        val sw = PillSwitch(context)
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.focusable(context, radiusDp = 14f, base = if (flat) 0x00000000 else Ui.SURFACE)
+            setPadding(dp(if (flat) 4f else 14f), dp(10f), dp(if (flat) 2f else 12f), dp(10f))
+            isFocusable = enabled
+            isClickable = enabled
+            alpha = if (enabled) 1f else 0.55f
+        }
+        val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(TextView(context).apply {
+            text = title
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+            typeface = Ui.LABEL
+        })
+        texts.addView(TextView(context).apply {
+            text = subtitle
+            setTextColor(Ui.TEXT_DIM)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            setLineSpacing(0f, 1.1f)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+            it.topMargin = dp(1f)
+        })
+        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginEnd = dp(12f) })
+        row.addView(sw)
+        sw.isEnabled = enabled
+        sw.setOn(get(), false)
+        row.setOnClickListener {
+            val next = !sw.isOn
+            sw.setOn(next, true)
+            set(next)
+        }
+        if (register) refreshers.add { sw.setOn(get(), false) }
+        return row
+    }
+
+    private fun optionCard(title: String, description: String, selected: () -> Boolean, onPick: () -> Unit): View {
+        val check = ImageView(context).apply { setImageDrawable(Icon(context, Icon.Kind.CHECK, Ui.ACCENT, 20f)) }
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14f), dp(12f), dp(14f), dp(12f))
+            isFocusable = true
+            isClickable = true
+            setOnClickListener { onPick() }
+        }
+        val texts = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(TextView(context).apply {
+            text = title
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            typeface = Ui.LABEL
+        })
+        texts.addView(TextView(context).apply {
+            text = description
+            setTextColor(Ui.TEXT_DIM)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            setLineSpacing(0f, 1.1f)
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+            it.topMargin = dp(2f)
+        })
+        card.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        card.addView(check, LinearLayout.LayoutParams(dp(20f), dp(20f)).also { it.marginStart = dp(10f) })
+        refreshers.add {
+            val sel = selected()
+            card.background = Ui.optionCard(context, sel)
+            check.visibility = if (sel) View.VISIBLE else View.INVISIBLE
+        }
+        return card
+    }
+
+    private fun segmented(options: List<Pair<String, String>>, selected: () -> String, onPick: (String) -> Unit): View {
+        val bar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = Ui.rounded(context, Ui.SURFACE, 14f)
+            setPadding(dp(4f), dp(4f), dp(4f), dp(4f))
+        }
+        val items = ArrayList<Pair<String, TextView>>()
+        options.forEachIndexed { i, (value, label) ->
+            val t = TextView(context).apply {
+                text = label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                typeface = Ui.LABEL
+                gravity = Gravity.CENTER
+                isFocusable = true
+                isClickable = true
+                setOnClickListener {
+                    onPick(value)
+                    for (r in refreshers) r()
+                }
             }
-            c.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            chips.add(value to c)
-            r.addView(c, LinearLayout.LayoutParams(0, dp(46f), 1f).also { it.marginEnd = dp(5f) })
+            items.add(value to t)
+            bar.addView(t, LinearLayout.LayoutParams(0, dp(40f), 1f).also { if (i > 0) it.marginStart = dp(4f) })
         }
         refreshers.add {
             val sel = selected()
-            for ((value, c) in chips) {
+            for ((value, t) in items) {
                 val on = value == sel
-                c.background = Ui.focusable(context, on)
-                c.setTextColor(if (on) Color.WHITE else Ui.TEXT)
+                t.background = Ui.focusable(context, on, 10f, 0x00000000)
+                t.setTextColor(if (on) Color.WHITE else Ui.TEXT_DIM)
             }
         }
-        return r
-    }
-
-    private fun toggle(label: String, get: () -> Boolean, set: (Boolean) -> Unit): Switch {
-        val s = Switch(context)
-        s.text = label
-        s.setTextColor(Ui.TEXT)
-        s.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
-        s.background = Ui.focusable(context)
-        s.setPadding(dp(12f), dp(10f), dp(12f), dp(10f))
-        s.isFocusable = true
-        val listener = android.widget.CompoundButton.OnCheckedChangeListener { _, checked -> set(checked) }
-        refreshers.add {
-            s.setOnCheckedChangeListener(null)
-            s.isChecked = get()
-            s.setOnCheckedChangeListener(listener)
-        }
-        s.layoutParams = topMargin(5f)
-        return s
+        return bar
     }
 
     private fun slider(
         label: String, min: Float, max: Float, step: Float,
         get: () -> Float, set: (Float) -> Unit, format: (Float) -> String
-    ): LinearLayout {
+    ): View {
         val box = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = Ui.rounded(context, Ui.CHIP, 10f)
-            setPadding(dp(12f), dp(8f), dp(12f), dp(6f))
+            background = Ui.rounded(context, Ui.SURFACE, 14f)
+            setPadding(dp(14f), dp(10f), dp(8f), dp(4f))
         }
-        val title = TextView(context).apply { setTextColor(Ui.TEXT); setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f) }
+        val head = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        head.addView(TextView(context).apply {
+            text = label
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+            typeface = Ui.LABEL
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val value = TextView(context).apply {
+            setTextColor(Ui.ACCENT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            typeface = Ui.TITLE
+            setPadding(0, 0, dp(8f), 0)
+        }
+        head.addView(value)
         val steps = ((max - min) / step).roundToInt()
         val bar = SeekBar(context).apply {
             this.max = steps
             isFocusable = true
-            background = Ui.focusable(context)
-            setPadding(dp(16f), dp(10f), dp(16f), dp(10f))
+            background = Ui.focusable(context, radiusDp = 12f, base = 0x00000000)
+            setPadding(dp(14f), dp(12f), dp(14f), dp(12f))
+            progressTintList = ColorStateList.valueOf(Ui.ACCENT)
+            progressBackgroundTintList = ColorStateList.valueOf(0x40FFFFFF)
+            thumbTintList = ColorStateList.valueOf(Color.WHITE)
         }
         bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
                 val v = min + progress * step
-                title.text = label + ": " + format(v)
+                value.text = format(v)
                 if (fromUser) {
                     set(v)
                     handler.removeCallbacks(applyRunnable)
@@ -494,12 +1006,80 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         refreshers.add {
             val v = get()
             bar.progress = ((v - min) / step).roundToInt().coerceIn(0, steps)
-            title.text = label + ": " + format(v)
+            value.text = format(v)
         }
-        box.addView(title)
+        box.addView(head)
         box.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44f)))
-        box.layoutParams = topMargin(6f)
         return box
+    }
+
+    private fun statusRow(item: StatusItem): View {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(14f), dp(12f), dp(14f), dp(12f))
+            background = Ui.rounded(context, Ui.SURFACE, 14f)
+        }
+        val dot = View(context).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(
+                    when (item.level) {
+                        LEVEL_OK -> Ui.OK
+                        LEVEL_WARN -> Ui.WARN
+                        LEVEL_BAD -> Ui.BAD
+                        else -> Ui.TEXT_FAINT
+                    }
+                )
+            }
+        }
+        row.addView(dot, LinearLayout.LayoutParams(dp(8f), dp(8f)).also { it.topMargin = dp(6f) })
+        row.addView(TextView(context).apply {
+            text = item.label
+            setTextColor(Ui.TEXT_DIM)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        }, LinearLayout.LayoutParams(dp(118f), ViewGroup.LayoutParams.WRAP_CONTENT).also { it.marginStart = dp(12f) })
+        row.addView(TextView(context).apply {
+            text = item.value
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            setLineSpacing(0f, 1.1f)
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.layoutParams = lp(top = 6f)
+        return row
+    }
+
+    /** Controller button badge: ABXY in their Xbox colours, everything else as an outlined pill. */
+    private fun buttonGlyph(index: Int): TextView = glyph(GLYPH_LABELS[index], small = false, face = FACE_COLORS[index])
+
+    private fun glyph(label: String, small: Boolean, face: Int = 0): TextView = TextView(context).apply {
+        text = label
+        typeface = Ui.DISPLAY
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, if (small) 10.5f else 13f)
+        gravity = Gravity.CENTER
+        val h = dp(if (small) 20f else 28f)
+        minHeight = h
+        minWidth = h
+        if (face != 0) {
+            setTextColor(face)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor((face and 0x00FFFFFF) or 0x2E000000)
+                setStroke(dp(1.5f), face)
+            }
+            setPadding(0, 0, 0, 0)
+        } else {
+            setTextColor(if (small) Ui.TEXT_DIM else Ui.TEXT)
+            background = Ui.rounded(context, 0x00000000, if (small) 6f else 9f, Ui.TEXT_FAINT, 1f)
+            setPadding(dp(if (small) 5f else 8f), 0, dp(if (small) 5f else 8f), 0)
+        }
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, h)
+    }
+
+    private fun refreshNav() {
+        backButton.isEnabled = host.canGoBack()
+        backButton.alpha = if (backButton.isEnabled) 1f else 0.35f
+        forwardButton.isEnabled = host.canGoForward()
+        forwardButton.alpha = if (forwardButton.isEnabled) 1f else 0.35f
     }
 
     private fun trimScale(v: Float): String = when {
@@ -509,18 +1089,40 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
     }
 
     companion object {
+        const val SITE_NONE = 0
+        const val SITE_BUILT_IN = 1
+        const val SITE_ALLOWED = 2
+        const val SITE_SHIELDED = 3
+
+        const val LEVEL_OK = 0
+        const val LEVEL_WARN = 1
+        const val LEVEL_BAD = 2
+        const val LEVEL_INFO = 3
+
         val BOOKMARKS = listOf(
-            Bookmark("Radiant Catalog (32 Games)", "https://radiantoptimizer.games"),
-            Bookmark("Radiant Full Index (185 Games)", "https://radiantoptimizer.lol"),
-            Bookmark("BO1 Zombies Hub", "https://vel.gg/bo1z"),
-            Bookmark("Quake 1 Arena", "https://q1.pieter.com"),
-            Bookmark("Quake 2 Arena", "https://q2.pieter.com"),
-            Bookmark("Return to Castle Wolfenstein", "https://rtcw.pieter.com"),
-            Bookmark("Urban Terror", "https://ut.pieter.com"),
-            Bookmark("CS Surf", "https://surfd.net"),
-            Bookmark("WASM Arcade (GTA III / Minecraft)", "https://wasmarcade.com"),
-            Bookmark("WebXash (Half-Life / CS 1.6)", "https://x8bitrain.github.io/webXash/"),
-            Bookmark("Diablo Web", "https://johnimril.github.io/diablo_web/")
+            Bookmark("Radiant Catalog", "RC", "https://radiantoptimizer.games"),
+            Bookmark("Radiant Full Index", "RI", "https://radiantoptimizer.lol"),
+            Bookmark("BO1 Zombies Hub", "BO", "https://vel.gg/bo1z"),
+            Bookmark("Quake 1 Arena", "Q1", "https://q1.pieter.com"),
+            Bookmark("Quake 2 Arena", "Q2", "https://q2.pieter.com"),
+            Bookmark("Return to Castle Wolfenstein", "RW", "https://rtcw.pieter.com"),
+            Bookmark("Urban Terror", "UT", "https://ut.pieter.com"),
+            Bookmark("CS Surf", "CS", "https://surfd.net"),
+            Bookmark("WASM Arcade", "WA", "https://wasmarcade.com"),
+            Bookmark("WebXash (Half-Life, CS 1.6)", "HL", "https://x8bitrain.github.io/webXash/"),
+            Bookmark("Diablo Web", "DI", "https://johnimril.github.io/diablo_web/")
         )
+
+        private val GLYPH_LABELS = arrayOf(
+            "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "Select", "Start", "L3", "R3",
+            "D↑", "D↓", "D←", "D→", "Guide"
+        )
+
+        private val PLAYSTATION_NAMES = arrayOf(
+            "Cross", "Circle", "Square", "Triangle", "L1", "R1", "L2", "R2", "Share", "Options",
+            "Left stick", "Right stick", "Up", "Down", "Left", "Right", "PS"
+        )
+
+        private val FACE_COLORS = intArrayOf(Ui.OK, Ui.BAD, Ui.FACE_X, Ui.WARN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     }
 }

@@ -283,7 +283,7 @@ class TouchGamepadView(context: Context, private val listener: Listener) : View(
     override fun onDraw(canvas: Canvas) {
         for (b in buttons) {
             val pressed = state[b.index] > 0.5f
-            fillPaint.color = if (pressed) Color.argb(150, 0, 229, 255) else Color.argb(70, 20, 20, 24)
+            fillPaint.color = if (pressed) Color.argb(170, 139, 124, 255) else Color.argb(70, 20, 20, 24)
             canvas.drawCircle(b.cx, b.cy, b.r, fillPaint)
             canvas.drawCircle(b.cx, b.cy, b.r, strokePaint)
             textPaint.textSize = if (b.label.length > 1) dp(13f) else dp(16f)
@@ -301,7 +301,7 @@ class TouchGamepadView(context: Context, private val listener: Listener) : View(
             fillPaint.color = Color.argb(60, 255, 255, 255)
             canvas.drawCircle(stickBaseX, stickBaseY, radius, fillPaint)
             canvas.drawCircle(stickBaseX, stickBaseY, radius, strokePaint)
-            fillPaint.color = if (l3Held) Color.argb(200, 0, 229, 255) else Color.argb(170, 255, 255, 255)
+            fillPaint.color = if (l3Held) Color.argb(210, 139, 124, 255) else Color.argb(170, 255, 255, 255)
             val kx = stickBaseX + axes[0] * radius
             val ky = stickBaseY + axes[1] * radius
             canvas.drawCircle(kx, ky, dp(26f), fillPaint)

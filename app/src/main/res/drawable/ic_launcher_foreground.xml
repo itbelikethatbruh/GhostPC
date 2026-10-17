@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Monitor above a controller: "PC games on a phone". Artwork stays inside the 66dp safe zone. -->
+<!-- Monitor above a controller, in the app's cyan-violet-pink spectrum. Inside the 66dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
@@ -10,26 +11,35 @@
         android:pivotY="54"
         android:scaleX="0.86"
         android:scaleY="0.86">
-    <!-- monitor -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FF00E5FF"
-        android:strokeWidth="2.6"
-        android:pathData="M42,27 H66 Q68,27 68,29 V38 Q68,40 66,40 H42 Q40,40 40,38 V29 Q40,27 42,27 Z" />
-    <path
-        android:fillColor="#FF00E5FF"
-        android:pathData="M51.5,40 H56.5 V44 H51.5 Z" />
-    <!-- controller body -->
-    <path
-        android:fillColor="#FF00E5FF"
-        android:pathData="M38,45 H70 C77,45 81.5,50 83.5,59 L85.5,69 C86.5,75 81,78.5 77,74.5 L70.5,68 H37.5 L31,74.5 C27,78.5 21.5,75 22.5,69 L24.5,59 C26.5,50 31,45 38,45 Z" />
-    <!-- d-pad -->
-    <path
-        android:fillColor="#FF0B0E13"
-        android:pathData="M37.5,51 H41.5 V54.5 H45 V58.5 H41.5 V62 H37.5 V58.5 H34 V54.5 H37.5 Z" />
-    <!-- face buttons -->
-    <path
-        android:fillColor="#FF0B0E13"
-        android:pathData="M68,50.5 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 M73.5,56 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 M62.5,56 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 M68,61.5 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0" />
+        <path
+            android:fillColor="#00000000"
+            android:strokeWidth="2.6"
+            android:pathData="M42,27 H66 Q68,27 68,29 V38 Q68,40 66,40 H42 Q40,40 40,38 V29 Q40,27 42,27 Z">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="40" android:startY="27"
+                    android:endX="68" android:endY="40"
+                    android:startColor="#FF5EE7FF"
+                    android:centerColor="#FF8B7CFF"
+                    android:endColor="#FFFF6FD8" />
+            </aapt:attr>
+        </path>
+        <path
+            android:fillColor="#FF8B7CFF"
+            android:pathData="M51.5,40 H56.5 V44 H51.5 Z" />
+        <path
+            android:fillType="evenOdd"
+            android:pathData="M38,45 H70 C77,45 81.5,50 83.5,59 L85.5,69 C86.5,75 81,78.5 77,74.5 L70.5,68 H37.5 L31,74.5 C27,78.5 21.5,75 22.5,69 L24.5,59 C26.5,50 31,45 38,45 Z M37.5,51 H41.5 V54.5 H45 V58.5 H41.5 V62 H37.5 V58.5 H34 V54.5 H37.5 Z M68,50.5 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 M73.5,56 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 M62.5,56 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0 M68,61.5 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="22" android:startY="45"
+                    android:endX="86" android:endY="78"
+                    android:startColor="#FF5EE7FF"
+                    android:centerColor="#FF8B7CFF"
+                    android:endColor="#FFFF6FD8" />
+            </aapt:attr>
+        </path>
     </group>
 </vector>

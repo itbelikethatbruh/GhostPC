@@ -60,6 +60,24 @@ class Prefs(context: Context) {
         get() = HashSet(sp.getStringSet(K_ALLOWED, emptySet()) ?: emptySet())
         set(value) = sp.edit().putStringSet(K_ALLOWED, HashSet(value)).apply()
 
+    /** Which desktop browser pages are told they run in: chrome, edge, firefox or android (no spoofing). */
+    var identity: String
+        get() {
+            val v = sp.getString(K_IDENTITY, IDENTITY_CHROME) ?: IDENTITY_CHROME
+            return if (v in IDENTITIES) v else IDENTITY_CHROME
+        }
+        set(value) = sp.edit().putString(K_IDENTITY, if (value in IDENTITIES) value else IDENTITY_CHROME).apply()
+
+    /** Turn on multithreading automatically for sites whose headers ask for cross-origin isolation. */
+    var autoThreads: Boolean
+        get() = sp.getBoolean(K_AUTO_THREADS, true)
+        set(value) = sp.edit().putBoolean(K_AUTO_THREADS, value).apply()
+
+    /** Origins (scheme://host[:port]) that get SharedArrayBuffer through WebView's isolation allowlist. */
+    var threadOrigins: Set<String>
+        get() = HashSet(sp.getStringSet(K_THREAD_ORIGINS, DEFAULT_THREAD_ORIGINS) ?: DEFAULT_THREAD_ORIGINS)
+        set(value) = sp.edit().putStringSet(K_THREAD_ORIGINS, HashSet(value)).apply()
+
     /** Controller button index (standard mapping 0..16) -> action string understood by the JS engine. */
     val binds: Map<Int, String>
         get() {
@@ -101,6 +119,7 @@ class Prefs(context: Context) {
             .put("desktopViewport", desktopViewport)
             .put("autoCursor", autoCursor)
             .put("binds", b)
+            .put("identity", identity)
     }
 
     companion object {
@@ -108,6 +127,15 @@ class Prefs(context: Context) {
         const val MODE_PAD = "pad"
         const val MODE_HYBRID = "hybrid"
         val MODES = setOf(MODE_KBM, MODE_PAD, MODE_HYBRID)
+
+        const val IDENTITY_CHROME = "chrome"
+        const val IDENTITY_EDGE = "edge"
+        const val IDENTITY_FIREFOX = "firefox"
+        const val IDENTITY_ANDROID = "android"
+        val IDENTITIES = setOf(IDENTITY_CHROME, IDENTITY_EDGE, IDENTITY_FIREFOX, IDENTITY_ANDROID)
+
+        /** Sites known to need threads; anything else is added when it asks (autoThreads) or by hand. */
+        val DEFAULT_THREAD_ORIGINS: Set<String> = setOf("https://vel.gg")
 
         private const val K_MODE = "mode"
         private const val K_SENS = "sens"
@@ -121,6 +149,9 @@ class Prefs(context: Context) {
         private const val K_LAST_URL = "last_url"
         private const val K_ALLOWED = "allowed_hosts"
         private const val K_BINDS = "binds"
+        private const val K_IDENTITY = "identity"
+        private const val K_AUTO_THREADS = "auto_threads"
+        private const val K_THREAD_ORIGINS = "thread_origins"
 
         val DEFAULT_BINDS: Map<Int, String> = mapOf(
             0 to "Space",

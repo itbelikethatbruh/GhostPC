@@ -65,6 +65,22 @@ class NavigationShield(private val prefs: Prefs) {
         sessionAllowed.add(h)
     }
 
+    fun removeAlways(host: String) {
+        val h = host.lowercase(Locale.ROOT)
+        val key = siteKey(h)
+        prefs.userAllowedHosts = prefs.userAllowedHosts.filterNot { it == key || it == h }.toSet()
+        sessionAllowed.remove(h)
+        sessionAllowed.remove(key)
+    }
+
+    /** True only for hosts the user allowed, not for the built-in game list. */
+    fun isUserAllowed(host: String): Boolean {
+        val h = host.lowercase(Locale.ROOT)
+        return matches(h, prefs.userAllowedHosts) || matches(h, sessionAllowed)
+    }
+
+    fun isBuiltInAllowed(host: String): Boolean = matches(host.lowercase(Locale.ROOT), DEFAULT_ALLOWED)
+
     /** Thread-safe (immutable set), used from shouldInterceptRequest on a background thread. */
     fun isAdHost(host: String): Boolean = matches(host.lowercase(Locale.ROOT), AD_HOSTS)
 
