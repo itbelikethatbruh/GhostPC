@@ -711,8 +711,16 @@ class MainActivity : ComponentActivity(),
                 updatePointerCapture()
             }
             "gl" -> {
-                glStatus = msg.optString("api").uppercase(Locale.ROOT) + " · " + msg.optString("renderer") +
-                    " · S3TC " + msg.optString("s3tc")
+                val api = when (msg.optString("api").lowercase(Locale.ROOT)) {
+                    "webgl2" -> "WebGL 2"
+                    "webgl", "experimental-webgl" -> "WebGL 1"
+                    else -> msg.optString("api")
+                }
+                val s3tc = msg.optString("s3tc")
+                // The renderer string is empty when the browser hides it; skip empty parts.
+                glStatus = listOf(api, msg.optString("renderer").trim(), if (s3tc.isEmpty()) "" else "S3TC textures $s3tc")
+                    .filter { it.isNotEmpty() }
+                    .joinToString("\n")
                 val sab = msg.optString("sab")
                 if (sab.isNotEmpty()) threadStatus = sab
                 drawer.refreshStatus()
