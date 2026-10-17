@@ -37,6 +37,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -485,6 +486,12 @@ class MainActivity : ComponentActivity(),
             updateCursorState()
             updatePointerCapture()
             drawer.onUrlChanged(url)
+        }
+
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+            if (request.isForMainFrame) {
+                Log.w(TAG, "Page failed to load: " + request.url + " (" + error.errorCode + " " + error.description + ")")
+            }
         }
 
         override fun onPageFinished(view: WebView, url: String?) {
