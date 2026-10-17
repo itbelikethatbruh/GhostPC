@@ -111,19 +111,41 @@ crashed && fail "The app crashed while using the menu"
 adb shell input keyevent KEYCODE_BACK
 sleep 1
 
+echo "== Page script inside Web Workers"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/report-server.py" "$SCRIPT_DIR/worker-test" "$OUT" 8090 &
+SERVER_PID=$!
+trap 'kill $SERVER_PID 2>/dev/null' EXIT
+adb reverse tcp:8090 tcp:8090 || echo "::warning::adb reverse failed"
+rm -f "$OUT/worker-result.json"
+adb shell am start -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "http://localhost:8090/index.html" || true
+for _ in $(seq 1 30); do
+  [ -f "$OUT/worker-result.json" ] && break
+  sleep 1
+done
+shot "06-worker-test"
+if [ -f "$OUT/worker-result.json" ]; then
+  cat "$OUT/worker-result.json"
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["pass"] else 1)' "$OUT/worker-result.json" \
+    || fail "S3TC emulation is missing in the page or in a worker (see worker-result.json)"
+else
+  fail "The worker test page never reported back"
+fi
+crashed && fail "The app crashed on the worker test page"
+
 echo "== Site that asks for multithreading"
 adb shell am start -W -n "$ACTIVITY" -a android.intent.action.VIEW -d "https://vel.gg/bsz/cotd" || true
 sleep 30
 crashed && fail "The app crashed on vel.gg"
 alive || fail "The app is not running after opening vel.gg"
-shot "06-velgg"
+shot "07-velgg"
 close_dialogs
 adb shell input keyevent KEYCODE_BACK
 sleep 2
-shot "07-velgg-menu"
+shot "08-velgg-menu"
 if tap_desc "Status"; then
   sleep 1.5
-  shot "08-velgg-status"
+  shot "09-velgg-status"
 fi
 
 crashed && fail "The app crashed"

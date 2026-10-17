@@ -84,6 +84,15 @@ Radiant does both:
 
 This needs an Android System WebView recent enough to support the allowlist. If yours is older, the drawer says "Needs a newer Android System WebView": update it from the Play Store.
 
+## Games that render from a worker thread
+
+Multithreaded games often create their WebGL context inside a Web Worker (OffscreenCanvas), where document-start scripts never run. That is why a site can accept the page but then report "missing WEBGL_compressed_texture_s3tc". Radiant puts its page script into every worker:
+
+- worker scripts loaded by URL are tagged with `?__radiant_worker=1`; the app serves those requests itself with the script prepended, so the worker's own URL stays intact;
+- blob and data URL workers are wrapped in a small blob that runs the script and then imports the original.
+
+Inside a worker only the desktop navigator spoof, the WebGL emulation and the worker patch run. The Status tab shows the worker's WebGL context with "(worker)" after the renderer name. CI checks all three paths (page, URL worker, blob worker) on a real WebView.
+
 ## Browser identity
 
 Display tab → *Browser identity* picks what sites see. The page reloads after a change.
@@ -120,6 +129,5 @@ Open it again, then Menu > Status. A *Last crash* row shows what failed, and *Co
 - **Engine:** games are limited by Android System WebView (Chromium) on a phone GPU. Keep Android System WebView updated from the Play Store.
 - **Threads:** shared memory needs a WebView that supports the isolation allowlist (see *Multithreaded games*). The drawer's *Status* tab shows whether the current page has it. A page reached through an HTTP redirect may load without isolation; open its final URL directly (or bookmark it) if that happens.
 - **S3TC cost:** each S3TC texture is decoded once on upload, about 70-130 ms for a 2048×2048 DXT5 texture on a desktop CPU and slower on phones. Decoded textures use 4-8× more GPU memory. If a game crashes with "out of memory", try 50% resolution; the app reloads crashed renderers automatically.
-- **Worker rendering:** WebGL rendered from Workers (OffscreenCanvas) is not covered by the S3TC shim.
 - **Desktop spoofing:** CSS `@media (pointer: coarse)` rules inside stylesheets still see the touchscreen; JavaScript `matchMedia` is spoofed.
 - **Game files:** sites that need your own files (Half-Life valve data, Diablo DIABDAT.MPQ, ISO images) get them through the file picker. Only use files you own.

@@ -2,15 +2,11 @@ package com.radiant.pcbrowser
 
 import android.net.Uri
 import android.util.Log
-import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import java.io.ByteArrayInputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Locale
 
 /**
@@ -81,60 +77,15 @@ class IsolationManager(private val prefs: Prefs) {
      * Returns null (WebView then loads it normally) for redirects and on any failure.
      */
     fun fetchIsolated(request: WebResourceRequest): WebResourceResponse? {
-        val url = request.url.toString()
-        var conn: HttpURLConnection? = null
-        try {
-            conn = URL(url).openConnection() as HttpURLConnection
-            conn.instanceFollowRedirects = false
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 30_000
-            for ((k, v) in request.requestHeaders ?: emptyMap()) {
-                // Let HttpURLConnection negotiate and decode compression itself.
-                if (k.equals("Accept-Encoding", true) || k.equals("Range", true)) continue
-                conn.setRequestProperty(k, v)
-            }
-            if (userAgent.isNotEmpty()) conn.setRequestProperty("User-Agent", userAgent)
-            CookieManager.getInstance().getCookie(url)?.let { conn.setRequestProperty("Cookie", it) }
-
-            val code = conn.responseCode
-            if (code in 300..399) {
-                // WebView repeats the request natively and follows the redirect itself.
-                conn.disconnect()
-                return null
-            }
-
-            val headers = LinkedHashMap<String, String>()
-            var coep = ""
-            for ((key, values) in conn.headerFields) {
-                if (key == null) continue
-                when (key.lowercase(Locale.ROOT)) {
-                    "set-cookie" -> values.forEach { CookieManager.getInstance().setCookie(url, it) }
-                    // The body is already decoded and re-streamed.
-                    "content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive" -> Unit
-                    else -> {
-                        val joined = values.joinToString(", ")
-                        headers[key] = joined
-                        if (key.equals("Cross-Origin-Embedder-Policy", true)) coep = joined.lowercase(Locale.ROOT)
-                    }
-                }
-            }
-            headers.keys.firstOrNull { it.equals("Document-Isolation-Policy", true) }?.let { headers.remove(it) }
-            headers["Document-Isolation-Policy"] =
-                if (coep.contains("require-corp")) "isolate-and-require-corp" else "isolate-and-credentialless"
-
-            val contentType = conn.contentType ?: "text/html"
-            val mime = contentType.substringBefore(';').trim().ifEmpty { "text/html" }
-            val charset = Regex("charset=\"?([^;\"]+)", RegexOption.IGNORE_CASE).find(contentType)
-                ?.groupValues?.get(1)?.trim() ?: "utf-8"
-            val body = if (code >= 400) conn.errorStream ?: ByteArrayInputStream(ByteArray(0)) else conn.inputStream
-            val reason = conn.responseMessage?.takeIf { it.isNotBlank() } ?: if (code < 400) "OK" else "Error"
-            return WebResourceResponse(mime, charset, code, reason, headers, body)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Isolated fetch failed for $url, loading normally", t)
-            conn?.disconnect()
-            return null
-        }
+        val fetched = Refetch.get(request.url.toString(), request, userAgent) ?: return null
+        val headers = fetched.headers
+        val coep = headers.entries.firstOrNull { it.key.equals("Cross-Origin-Embedder-Policy", true) }
+            ?.value?.lowercase(Locale.ROOT) ?: ""
+        headers.keys.firstOrNull { it.equals("Document-Isolation-Policy", true) }?.let { headers.remove(it) }
+        headers["Document-Isolation-Policy"] =
+            if (coep.contains("require-corp")) "isolate-and-require-corp" else "isolate-and-credentialless"
+        return WebResourceResponse(fetched.mime.ifEmpty { "text/html" }, fetched.charset, fetched.code, fetched.reason,
+            headers, fetched.body)
     }
 
     private fun header(headers: Map<String, String>, name: String): String? =

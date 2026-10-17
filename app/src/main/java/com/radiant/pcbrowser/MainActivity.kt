@@ -91,6 +91,8 @@ class MainActivity : ComponentActivity(),
     private val ui = Handler(Looper.getMainLooper())
 
     private var shimSource = ""
+    /** The page script as last installed, read on the network thread for worker scripts. */
+    @Volatile private var workerScript: String? = null
     private var scriptHandler: ScriptHandler? = null
     private var docStartSupported = false
     private var messageListenerSupported = false
@@ -378,6 +380,7 @@ class MainActivity : ComponentActivity(),
         }
         docStartSupported = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
         if (docStartSupported) {
+            workerScript = null
             scriptHandler = WebViewCompat.addDocumentStartJavaScript(wv, buildScript(), setOf("*"))
         }
 
@@ -425,7 +428,7 @@ class MainActivity : ComponentActivity(),
             .put("bridge", WebBridge.JS_OBJECT_NAME)
             .put("settings", prefs.settingsJson())
             .put("scale", pageScale.toDouble())
-        return "window.__RADIANT_BOOT__=" + boot.toString() + ";\n" + shimSource
+        return "self.__RADIANT_BOOT__=" + boot.toString() + ";\n" + shimSource
     }
 
     /** New frames get the new settings at document start; existing frames got a "cfg" message. */
@@ -433,6 +436,7 @@ class MainActivity : ComponentActivity(),
         val wv = webView ?: return
         if (!docStartSupported) return
         scriptHandler?.remove()
+        workerScript = null
         scriptHandler = WebViewCompat.addDocumentStartJavaScript(wv, buildScript(), setOf("*"))
     }
 
@@ -464,6 +468,10 @@ class MainActivity : ComponentActivity(),
             val host = request.url.host ?: return null
             if (shield.isAdHost(host)) {
                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+            }
+            if (WorkerScripts.isMarked(request)) {
+                return WorkerScripts.serve(request, workerScript ?: buildScript().also { workerScript = it },
+                    isolation.userAgent)
             }
             if (isolation.shouldIntercept(request)) return isolation.fetchIsolated(request)
             return null

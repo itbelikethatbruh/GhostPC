@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Radiant worker test</title>
+<style>
+  body { margin: 0; padding: 24px; background: #120f1c; color: #f2eeff; font: 22px/1.5 sans-serif; }
+  pre { font-size: 20px; white-space: pre-wrap; }
+  .ok { color: #5be49b; } .bad { color: #ff6b7a; }
+</style>
+</head>
+<body>
+<h1 id="verdict">Running...</h1>
+<pre id="out"></pre>
+<script>
+// Exercises the page script in every place a game can create a WebGL context:
+// the page itself, a worker loaded by URL (re-served by the app) and a blob worker (wrapped by the page).
+const results = {};
+const wanted = ['main', 'url', 'blob'];
+
+function render() {
+  document.getElementById('out').textContent = JSON.stringify(results, null, 2);
+  const have = wanted.filter((k) => results[k]);
+  if (have.length < wanted.length) return;
+  const good = wanted.every((k) => results[k].s3tc === true && results[k].listed === true);
+  const v = document.getElementById('verdict');
+  v.textContent = good ? 'PASS: S3TC available everywhere' : 'FAIL: S3TC missing somewhere';
+  v.className = good ? 'ok' : 'bad';
+  fetch('/result', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pass: good, results }) }).catch(() => {});
+}
+
+function done(name, data) { results[name] = data; render(); }
+
+function probe(name, worker) {
+  const timer = setTimeout(() => done(name, { error: 'no answer from the worker' }), 15000);
+  worker.onmessage = (e) => { clearTimeout(timer); done(name, e.data); };
+  worker.onerror = (e) => { clearTimeout(timer); done(name, { error: String(e.message || e) }); };
+  worker.postMessage('go');
+}
+
+try {
+  const c = document.createElement('canvas');
+  const gl = c.getContext('webgl2') || c.getContext('webgl');
+  done('main', {
+    shim: !!window.__radiantShimActive,
+    ua: navigator.userAgent,
+    isolated: !!window.crossOriginIsolated,
+    sab: typeof SharedArrayBuffer,
+    gl: !!gl,
+    s3tc: !!(gl && gl.getExtension('WEBGL_compressed_texture_s3tc')),
+    listed: !!(gl && gl.getSupportedExtensions().indexOf('WEBGL_compressed_texture_s3tc') >= 0)
+  });
+} catch (e) { done('main', { error: String(e) }); }
+
+try { probe('url', new Worker('probe.js?v=1')); } catch (e) { done('url', { error: String(e) }); }
+
+fetch('probe.js').then((r) => r.text()).then((src) => {
+  const blobSrc = src.replace("importScripts('helper.js');", 'self.__helper = 42;');
+  probe('blob', new Worker(URL.createObjectURL(new Blob([blobSrc], { type: 'text/javascript' }))));
+}).catch((e) => done('blob', { error: String(e) }));
+</script>
+</body>
+</html>

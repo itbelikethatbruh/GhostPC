@@ -3,7 +3,12 @@
  *
  * Injected by MainActivity with WebViewCompat.addDocumentStartJavaScript(webView, script, setOf("*")),
  * so it runs in every frame (top page and iframes) before any page script.
- * The app prepends one line:  window.__RADIANT_BOOT__ = { ua, chromeMajor, chromeFull, bridge, settings, scale };
+ * The app prepends one line:  self.__RADIANT_BOOT__ = { ua, chromeMajor, chromeFull, bridge, settings, scale };
+ *
+ * Web Workers get the same script (section 11): worker scripts loaded by URL are re-served by the
+ * app with this file prepended, blob workers are wrapped in the page. Inside a worker only the
+ * navigator spoof, the WebGL emulation and the worker patch run, so games that render from a
+ * worker thread (OffscreenCanvas, Emscripten PROXY_TO_PTHREAD) see the same desktop GPU features.
  *
  *   1. Windows 11 desktop environment (navigator, UA client hints, matchMedia, touch feature hiding)
  *   2. WebGL: S3TC / DXT1 / DXT3 / DXT5 software decoder behind emulated extensions
@@ -16,10 +21,11 @@
  *   9. Input engine: controller -> synthetic desktop keyboard / mouse events
  *  10. Native bridge (WebViewCompat.addWebMessageListener object, one channel per frame)
  */
-(function () {
+(function radiantShim() {
   'use strict';
 
-  var W = window;
+  var W = typeof window !== 'undefined' ? window : self;
+  const IS_WORKER = typeof WorkerGlobalScope !== 'undefined' && typeof importScripts === 'function';
   if (W.__radiantShimActive) return;
   try {
     Object.defineProperty(W, '__radiantShimActive', { value: true, configurable: false, enumerable: false });
@@ -34,7 +40,7 @@
   var BOOT = (W.__RADIANT_BOOT__ && typeof W.__RADIANT_BOOT__ === 'object') ? W.__RADIANT_BOOT__ : {};
   try { delete W.__RADIANT_BOOT__; } catch (e) { /* non-configurable on exotic hosts: ignore */ }
 
-  const IS_TOP = (function () { try { return W.top === W; } catch (e) { return false; } })();
+  const IS_TOP = !IS_WORKER && (function () { try { return W.top === W; } catch (e) { return false; } })();
   const now = () => performance.now();
 
   const DEFAULT_BINDS = {
@@ -111,10 +117,21 @@
   }
 
   // Channel to the app. Messages are queued until the injected bridge object is found.
+  // Workers have no bridge object; they relay through a BroadcastChannel to the page's shim.
+  const RELAY_CHANNEL = '__radiant_shim_relay';
+  const RELAYED_TYPES = ['gl'];
   const Native = {
     obj: null,
     queue: [],
+    relay: null,
     post(msg) {
+      if (IS_WORKER) {
+        try {
+          if (!this.relay) this.relay = new BroadcastChannel(RELAY_CHANNEL);
+          if (msg && RELAYED_TYPES.indexOf(msg.t) >= 0) this.relay.postMessage(msg);
+        } catch (e) { /* no BroadcastChannel: nothing to report */ }
+        return;
+      }
       let s;
       try { s = JSON.stringify(msg); } catch (e) { return; }
       if (this.obj) {
@@ -141,8 +158,7 @@
   const IDENTITY = ['chrome', 'edge', 'firefox', 'android'].indexOf(BOOT.identity) >= 0 ? BOOT.identity : 'chrome';
 
   // navigator.userAgentData (UA Client Hints JS API) for the Chromium-based identities.
-  function installUserAgentData(major, full) {
-    const NP = Navigator.prototype;
+  function installUserAgentData(NP, major, full) {
     const lead = IDENTITY === 'edge' ? 'Microsoft Edge' : 'Google Chrome';
     const brands = Object.freeze([
       Object.freeze({ brand: lead, version: major }),
@@ -191,7 +207,9 @@
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
     const major = String(BOOT.chromeMajor || (ua.match(/Chrome\/(\d+)/) || [0, '131'])[1]);
     const full = String(BOOT.chromeFull || (major + '.0.0.0'));
-    const NP = Navigator.prototype;
+    const NavCtor = W.Navigator || W.WorkerNavigator;
+    if (!NavCtor) return;
+    const NP = NavCtor.prototype;
     const nativeCores = navigator.hardwareConcurrency || 8;
     const firefox = IDENTITY === 'firefox';
 
@@ -213,9 +231,9 @@
       try { if (Object.prototype.hasOwnProperty.call(W, 'chrome')) delete W.chrome; } catch (e) { /* ignore */ }
     } else {
       defineGetter(NP, 'deviceMemory', () => 8);
-      installUserAgentData(major, full);
+      installUserAgentData(NP, major, full);
       // Desktop Chrome and Edge always expose window.chrome; Android WebView does not.
-      if (!W.chrome) {
+      if (!IS_WORKER && !W.chrome) {
         const chromeObj = {
           app: {
             isInstalled: false,
@@ -231,6 +249,8 @@
         } catch (e) { /* ignore */ }
       }
     }
+
+    if (IS_WORKER) return; // the rest is page-only (matchMedia, touch feature hiding, createEvent)
 
     // matchMedia: a desktop has a fine pointer that can hover and no coarse (touch) pointer.
     // Each pointer/hover feature is rewritten into an always-true or always-false condition so
@@ -1977,8 +1997,76 @@
   }
 
   // =====================================================================================
+  // 11. Web Workers: run this shim inside every worker the page starts
+  // =====================================================================================
+
+  // Query parameter that marks a worker script for the app, which re-serves it with this shim
+  // prepended (see WorkerScripts.kt). Blob and data URLs never reach the app, so those workers
+  // are wrapped in a blob that runs the shim and then imports the original script.
+  const WORKER_MARKER = '__radiant_worker';
+
+  function workerPrelude() {
+    const boot = Object.assign({}, BOOT, { worker: true, exposeInternals: false });
+    return 'self.__RADIANT_BOOT__=' + JSON.stringify(boot) + ';\n(' + radiantShim.toString() + ')();\n';
+  }
+
+  function workerScriptUrl(url, options) {
+    const abs = new URL(String(url), location.href);
+    if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+      if (abs.searchParams.has(WORKER_MARKER)) return url;
+      abs.searchParams.set(WORKER_MARKER, '1');
+      return abs.href;
+    }
+    if (abs.protocol !== 'blob:' && abs.protocol !== 'data:') return url;
+    const isModule = !!options && options.type === 'module';
+    const code = workerPrelude() +
+      (isModule ? 'import ' + JSON.stringify(abs.href) + ';' : 'importScripts(' + JSON.stringify(abs.href) + ');');
+    return URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+  }
+
+  function installWorkerShim() {
+    const OrigWorker = W.Worker;
+    if (typeof OrigWorker !== 'function') return;
+    const RadiantWorker = function Worker(url, options) {
+      if (!new.target) throw new TypeError("Failed to construct 'Worker': Please use the 'new' operator.");
+      let target = url;
+      try { target = workerScriptUrl(url, options); } catch (e) { target = url; }
+      return new OrigWorker(target, options);
+    };
+    RadiantWorker.prototype = OrigWorker.prototype;
+    try {
+      Object.defineProperty(RadiantWorker, 'toString', {
+        value: function toString() { return 'function Worker() { [native code] }'; }, configurable: true
+      });
+    } catch (e) { /* ignore */ }
+    W.Worker = RadiantWorker;
+
+    // Status reports from workers (first WebGL context) are forwarded to the app.
+    if (!IS_WORKER && typeof W.BroadcastChannel === 'function') {
+      try {
+        const relay = new BroadcastChannel(RELAY_CHANNEL);
+        relay.onmessage = (e) => {
+          const m = e && e.data;
+          if (m && typeof m === 'object' && RELAYED_TYPES.indexOf(m.t) >= 0) {
+            if (m.t === 'gl') m.renderer = String(m.renderer || '').slice(0, 120) + ' (worker)';
+            Native.post(m);
+          }
+        };
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  // =====================================================================================
   // Install
   // =====================================================================================
+
+  if (IS_WORKER) {
+    guard('desktop environment', installDesktopEnv);
+    guard('webgl', installWebGL);
+    guard('workers', installWorkerShim);
+    return;
+  }
+
 
   guard('desktop environment', installDesktopEnv);
   guard('webgl', installWebGL);
@@ -1990,13 +2078,14 @@
   guard('gamepad api', installGamepadAPI);
   guard('input', installInput);
   guard('native bridge', connectNative);
+  guard('workers', installWorkerShim);
   guard('isolation probe', () => setTimeout(detectIsolationRequest, 0));
 
   if (BOOT.exposeInternals) {
     W.__radiantInternals = {
       S: S, Input: Input, Lock: Lock, Status: Status, Display: Display, Native: Native,
       onNativeMessage: onNativeMessage, decodeS3TC: decodeS3TC, S3TC_FORMATS: S3TC_FORMATS,
-      isOwner: isOwner, IDENTITY: IDENTITY
+      isOwner: isOwner, IDENTITY: IDENTITY, workerScriptUrl: workerScriptUrl, WORKER_MARKER: WORKER_MARKER
     };
   }
 })();
