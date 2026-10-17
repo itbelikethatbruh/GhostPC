@@ -5,7 +5,7 @@ An Android WebView browser that presents itself to web games as desktop Chrome o
 ## Build the APK (no Android Studio needed)
 
 1. Create a GitHub repository and push this folder to it (`git init && git add . && git commit -m init && git push`).
-2. GitHub Actions runs `.github/workflows/build-apk.yml` on every push.
+2. GitHub Actions runs `.github/workflows/build-apk.yml` on every push. It builds the APKs, then installs the release APK on an Android emulator and uses it (start-up, every menu tab, a multithreaded site). A build that crashes there is not published. Screenshots and logs from that run are in the `smoke-test-<n>` artifact.
 3. Download the APK:
    - **From the default branch:** open the repo's **Releases** page on your phone and tap `RadiantPCGameBrowser-<n>.apk`.
    - **From any branch:** Actions tab → the run → `RadiantPCGameBrowser-<n>` artifact (a zip containing the APK).
@@ -110,6 +110,10 @@ Firefox identity only changes what JavaScript and headers report. The engine is 
 | UA hardcoded to Chrome/131 | UA uses the real WebView's Chrome major version (e.g. Chrome/141). | Version-sniffing sites then match the engine's real features; also applied to UA client-hint headers. |
 | Cursor clicks as synthetic JS events | Cursor clicks are real touch events injected into the WebView, re-typed as mouse for the page. | Synthetic events carry no user activation: file pickers (.wad/.mpq/.iso import), audio and popups would not open, and they can't reach cross-origin iframes. |
 | Fake fullscreen promise | Element fills the screen via the top layer and also works from inside iframes. | Games then get the full-screen canvas size they expect. |
+
+## If the app closes unexpectedly
+
+Open it again, then Menu > Status. A *Last crash* row shows what failed, and *Copy crash details* copies the full report so you can paste it into an issue or a chat. Crashes inside Android System WebView itself (Android 11+) are listed too, but Android gives no stack trace for those.
 
 ## Known limitations
 

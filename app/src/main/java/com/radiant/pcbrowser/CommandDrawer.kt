@@ -54,6 +54,9 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         fun setCursorEnabled(on: Boolean)
         fun isCursorEnabled(): Boolean
         fun statusItems(): List<StatusItem>
+        fun crashReport(): CrashLog.Report?
+        fun copyCrashReport()
+        fun clearCrashReport()
         fun requestCloseDrawer()
     }
 
@@ -213,6 +216,17 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         if (!isOpen) return
         statusBox.removeAllViews()
         for (item in host.statusItems()) statusBox.addView(statusRow(item))
+        val crash = host.crashReport() ?: return
+        statusBox.addView(statusRow(StatusItem("Last crash", CrashLog.stamp(crash.time) + "\n" + crash.summary, LEVEL_BAD)))
+        val actions = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        actions.addView(chip("Copy crash details") { host.copyCrashReport() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginEnd = dp(8f) })
+        actions.addView(chip("Clear") {
+            host.clearCrashReport()
+            refreshStatus()
+            railItems[Tab.STATUS]?.requestFocus()
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        statusBox.addView(actions, lp(top = 8f))
     }
 
     // ============================================================================ top bar + rail
@@ -873,13 +887,14 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginEnd = dp(12f) })
         row.addView(sw)
         sw.isEnabled = enabled
-        sw.setOn(get(), false)
+        // Registered rows get their state from refresh() when the panel opens. Reading it while the
+        // panel is being built would run host code before the activity has finished starting.
+        if (register) refreshers.add { sw.setOn(get(), false) } else sw.setOn(get(), false)
         row.setOnClickListener {
             val next = !sw.isOn
             sw.setOn(next, true)
             set(next)
         }
-        if (register) refreshers.add { sw.setOn(get(), false) }
         return row
     }
 

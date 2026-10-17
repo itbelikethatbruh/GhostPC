@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -155,6 +157,7 @@ class MainActivity : ComponentActivity(),
     // =====================================================================================
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        CrashLog.install(this)
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -225,6 +228,9 @@ class MainActivity : ComponentActivity(),
 
         hideSystemBars()
         loadTrusted(intent?.dataString ?: prefs.lastUrl ?: DEFAULT_URL)
+        if (CrashLog.takeNewCrashNotice(this)) {
+            Toast.makeText(this, "Radiant closed after an error last time. Menu > Status has the details.", Toast.LENGTH_LONG).show()
+        }
     }
 
     override fun onResume() {
@@ -807,12 +813,14 @@ class MainActivity : ComponentActivity(),
     }
 
     private fun autoCursorWanted(): Boolean {
+        if (!::controller.isInitialized) return false
         if (!prefs.autoCursor || prefs.mode != Prefs.MODE_KBM) return false
         if (lockOwnerId != 0) return false
         return controller.hasPhysicalController()
     }
 
     private fun updateCursorState() {
+        if (!::cursor.isInitialized || !::drawer.isInitialized) return
         val want = !drawer.isOpen && (cursorOverride ?: autoCursorWanted())
         if (want == cursor.active) return
         cursor.setActive(want)
@@ -1130,13 +1138,27 @@ class MainActivity : ComponentActivity(),
 
     override fun isCursorEnabled(): Boolean = cursorOverride ?: autoCursorWanted()
 
+    override fun crashReport(): CrashLog.Report? = CrashLog.last(this)
+
+    override fun copyCrashReport() {
+        val report = CrashLog.last(this) ?: return
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
+        clipboard.setPrimaryClip(ClipData.newPlainText("Radiant crash", report.details))
+        // Android 13+ shows its own "Copied" confirmation.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) toast("Crash details copied")
+    }
+
+    override fun clearCrashReport() {
+        CrashLog.clear(this)
+    }
+
     override fun statusItems(): List<CommandDrawer.StatusItem> {
         val ok = CommandDrawer.LEVEL_OK
         val warn = CommandDrawer.LEVEL_WARN
         val bad = CommandDrawer.LEVEL_BAD
         val info = CommandDrawer.LEVEL_INFO
         val items = ArrayList<CommandDrawer.StatusItem>()
-        val pads = controller.controllerNames
+        val pads = if (::controller.isInitialized) controller.controllerNames else emptyList()
         items.add(CommandDrawer.StatusItem("Controller",
             if (pads.isEmpty()) "None connected. Pair one over Bluetooth or plug it in." else pads.joinToString("\n"),
             if (pads.isEmpty()) warn else ok))
