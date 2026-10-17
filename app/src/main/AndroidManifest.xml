@@ -50,4 +50,10 @@
             </intent-filter>
         </activity>
     </application>
+    <!-- Lets the app open Android System WebView's DevTools screen (package visibility, Android 11+). -->
+    <queries>
+        <intent>
+            <action android:name="com.android.webview.SHOW_DEV_UI" />
+        </intent>
+    </queries>
 </manifest>

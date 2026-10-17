@@ -93,6 +93,16 @@ Multithreaded games often create their WebGL context inside a Web Worker (Offscr
 
 Inside a worker only the desktop navigator spoof, the WebGL emulation and the worker patch run. The Status tab shows the worker's WebGL context with "(worker)" after the renderer name. CI checks all three paths (page, URL worker, blob worker) on a real WebView.
 
+## When a game is slow
+
+Phones are fill-rate and memory-bandwidth bound, so the levers that matter are, in order:
+
+1. **Resolution** (Display tab). This scales the game's real drawing buffer while the game still sees the size it asked for, so it works for every WebGL game, including ones that render from a worker. 50% means four times fewer pixels; 35% is for heavy ports such as the Black Ops zombies maps.
+2. **Page width** (Display tab). A smaller desktop width means a smaller canvas for games that fill the window.
+3. **Status tab → Performance** tells you what is actually happening: frames per second, draw calls per second, and how much time per second goes into S3TC texture decoding. If decoding dominates, the game is streaming compressed textures and the phone pays for every one; if fps is low with little decoding, the GPU itself is the limit.
+
+**Vulkan:** the app cannot choose the GPU backend; Android System WebView does. Status → *GPU backend* shows what is in use (OpenGL ES, Vulkan through ANGLE, or software rendering). Display → *Open WebView DevTools* opens WebView's own Flags page, where `WebViewVulkan` turns on Vulkan compositing for every WebView app; Chromium warns it may crash on unsupported devices, and it is compositing, not the game's own drawing, so expect a small change at most.
+
 ## Browser identity
 
 Display tab → *Browser identity* picks what sites see. The page reloads after a change.
@@ -116,6 +126,7 @@ Firefox identity only changes what JavaScript and headers report. The engine is 
 | Y = mouse wheel **and** 1/2 toggle | Y = wheel down; "Toggle 1/2" is a separate binding. | Sending both switches weapons twice per press. |
 | Start = Esc **and** Enter | Tap = Esc, hold = Enter. | Pressing both at once opens a menu and confirms it in the same instant. |
 | Dispatch keys to canvas, document **and** window | One event on the focused target, bubbling to document and window. | Three dispatches = triple key presses for listeners on `window`. |
+| Report 8+ CPU cores | The real core count is reported. | Multithreaded games size their thread pools from it; claiming 8 cores on a 4-core phone oversubscribes the CPU. |
 | UA hardcoded to Chrome/131 | UA uses the real WebView's Chrome major version (e.g. Chrome/141). | Version-sniffing sites then match the engine's real features; also applied to UA client-hint headers. |
 | Cursor clicks as synthetic JS events | Cursor clicks are real touch events injected into the WebView, re-typed as mouse for the page. | Synthetic events carry no user activation: file pickers (.wad/.mpq/.iso import), audio and popups would not open, and they can't reach cross-origin iframes. |
 | Fake fullscreen promise | Element fills the screen via the top layer and also works from inside iframes. | Games then get the full-screen canvas size they expect. |
@@ -128,6 +139,6 @@ Open it again, then Menu > Status. A *Last crash* row shows what failed, and *Co
 
 - **Engine:** games are limited by Android System WebView (Chromium) on a phone GPU. Keep Android System WebView updated from the Play Store.
 - **Threads:** shared memory needs a WebView that supports the isolation allowlist (see *Multithreaded games*). The drawer's *Status* tab shows whether the current page has it. A page reached through an HTTP redirect may load without isolation; open its final URL directly (or bookmark it) if that happens.
-- **S3TC cost:** each S3TC texture is decoded once on upload, about 70-130 ms for a 2048×2048 DXT5 texture on a desktop CPU and slower on phones. Decoded textures use 4-8× more GPU memory. If a game crashes with "out of memory", try 50% resolution; the app reloads crashed renderers automatically.
+- **S3TC cost:** each S3TC texture is decoded once on upload, about 70-130 ms for a 2048×2048 DXT5 texture on a desktop CPU and slower on phones. Decoded textures use 4-8× more GPU memory and bandwidth, which costs frame rate on a phone GPU for the whole session, not just at load. If a game crashes with "out of memory", lower the resolution; the app reloads crashed renderers automatically.
 - **Desktop spoofing:** CSS `@media (pointer: coarse)` rules inside stylesheets still see the touchscreen; JavaScript `matchMedia` is spoofed.
 - **Game files:** sites that need your own files (Half-Life valve data, Diablo DIABDAT.MPQ, ISO images) get them through the file picker. Only use files you own.

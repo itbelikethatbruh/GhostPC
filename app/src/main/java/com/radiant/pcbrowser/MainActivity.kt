@@ -63,6 +63,7 @@ import androidx.webkit.WebViewFeature
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity(),
     WebBridge.Host,
@@ -111,6 +112,8 @@ class MainActivity : ComponentActivity(),
     private var cursorOverride: Boolean? = null
     private var glStatus = ""
     private var threadStatus = ""
+    private var perfStatus = ""
+    private var glRenderer = ""
     private var blockedUrl: String? = null
     private var windowFocused = false
     private val crashTimes = ArrayDeque<Long>()
@@ -482,6 +485,8 @@ class MainActivity : ComponentActivity(),
             lockOwnerId = 0
             cursorOverride = null
             glStatus = ""
+            glRenderer = ""
+            perfStatus = ""
             if (!docStartSupported) view.evaluateJavascript(buildScript(), null)
             updateCursorState()
             updatePointerCapture()
@@ -733,7 +738,8 @@ class MainActivity : ComponentActivity(),
                 }
                 val s3tc = msg.optString("s3tc")
                 // The renderer string is empty when the browser hides it; skip empty parts.
-                glStatus = listOf(api, msg.optString("renderer").trim(), if (s3tc.isEmpty()) "" else "S3TC textures $s3tc")
+                glRenderer = msg.optString("renderer").trim()
+                glStatus = listOf(api, glRenderer, if (s3tc.isEmpty()) "" else "S3TC textures $s3tc")
                     .filter { it.isNotEmpty() }
                     .joinToString("\n")
                 val sab = msg.optString("sab")
@@ -743,6 +749,26 @@ class MainActivity : ComponentActivity(),
             "status" -> {
                 if (frame.isMainFrame || threadStatus.isEmpty()) threadStatus = msg.optString("sab")
                 drawer.refreshStatus()
+            }
+            "perf" -> {
+                if (msg.has("fps")) {
+                    val fps = msg.optDouble("fps", 0.0)
+                    val draws = msg.optDouble("draws", 0.0)
+                    val decode = msg.optDouble("decodeMsPerSec", 0.0)
+                    val count = msg.optInt("decodeCount", 0)
+                    val mb = msg.optDouble("decodeMB", 0.0)
+                    val scale = msg.optDouble("scale", 1.0)
+                    val sb = StringBuilder()
+                    sb.append(String.format(Locale.US, "%.0f fps, %.0f draw calls/s", fps, draws))
+                    if (msg.optBoolean("worker")) sb.append(" (worker thread)")
+                    if (scale < 0.999) sb.append(String.format(Locale.US, "\nRendering at %d%% resolution", (scale * 100).roundToInt()))
+                    if (count > 0) {
+                        sb.append(String.format(Locale.US, "\nS3TC decode: %.0f ms per second now, %d textures (%.0f MB) so far",
+                            decode, count, mb))
+                    }
+                    perfStatus = sb.toString()
+                    if (drawer.isOpen) drawer.refreshStatus()
+                }
             }
             "coi" -> onIsolationRequested(frame)
             "rumble" -> {
@@ -1163,6 +1189,33 @@ class MainActivity : ComponentActivity(),
 
     override fun crashReport(): CrashLog.Report? = CrashLog.last(this)
 
+    /** What the WebView renders WebGL with, read from the renderer string the page reported. */
+    private fun graphicsBackend(): Pair<String, Int> {
+        val r = glRenderer.lowercase(Locale.ROOT)
+        return when {
+            r.isEmpty() -> "Unknown until a game starts" to CommandDrawer.LEVEL_INFO
+            r.contains("swiftshader") || r.contains("llvmpipe") || r.contains("software") ->
+                "Software rendering (no GPU). Games will be very slow." to CommandDrawer.LEVEL_BAD
+            r.contains("vulkan") -> "Vulkan (through ANGLE)" to CommandDrawer.LEVEL_OK
+            r.contains("opengl es") || r.contains("opengles") -> "OpenGL ES (the GPU driver)" to CommandDrawer.LEVEL_OK
+            else -> glRenderer to CommandDrawer.LEVEL_INFO
+        }
+    }
+
+    override fun graphicsBackendText(): String = graphicsBackend().first
+
+    override fun openWebViewDevTools() {
+        // Android System WebView's own settings screen (its flags apply to every WebView app).
+        val intent = Intent("com.android.webview.SHOW_DEV_UI").putExtra("fragment-id", 2)
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            toast("WebView DevTools is not available on this device. Update Android System WebView from the Play Store.")
+        } catch (t: Throwable) {
+            toast("Could not open WebView DevTools: " + t.message)
+        }
+    }
+
     override fun copyCrashReport() {
         val report = CrashLog.last(this) ?: return
         val clipboard = getSystemService(ClipboardManager::class.java) ?: return
@@ -1196,6 +1249,16 @@ class MainActivity : ComponentActivity(),
         items.add(CommandDrawer.StatusItem("Graphics",
             if (glStatus.isEmpty()) "No WebGL game running on this page" else glStatus,
             if (glStatus.isEmpty()) info else ok))
+        val backend = graphicsBackend()
+        items.add(CommandDrawer.StatusItem("GPU backend", backend.first, backend.second))
+        if (perfStatus.isNotEmpty()) {
+            val fpsLevel = when {
+                perfStatus.startsWith("0 fps") || perfStatus.startsWith("1 fps") -> info
+                Regex("^(\\d+) fps").find(perfStatus)?.groupValues?.get(1)?.toIntOrNull()?.let { it < 25 } == true -> warn
+                else -> ok
+            }
+            items.add(CommandDrawer.StatusItem("Performance", perfStatus, fpsLevel))
+        }
         val threadsLevel = when {
             threadStatus.startsWith("native") || threadStatus.startsWith("polyfilled") -> ok
             !isolation.supported -> bad

@@ -119,7 +119,7 @@
   // Channel to the app. Messages are queued until the injected bridge object is found.
   // Workers have no bridge object; they relay through a BroadcastChannel to the page's shim.
   const RELAY_CHANNEL = '__radiant_shim_relay';
-  const RELAYED_TYPES = ['gl'];
+  const RELAYED_TYPES = ['gl', 'perf'];
   const Native = {
     obj: null,
     queue: [],
@@ -146,6 +146,7 @@
   const Lock = { el: null };
   const Display = { pageScale: Number(BOOT.scale) > 0 ? Number(BOOT.scale) : 0, notify: function () {} };
   const Status = { sab: 'unknown', s3tc: 'unknown' };
+  const Perf = { frames: 0, draws: 0, decodeMs: 0, decodeCount: 0, decodeBytes: 0, started: false };
 
   // =====================================================================================
   // 1. Windows 11 desktop environment
@@ -218,7 +219,9 @@
     defineGetter(NP, 'platform', () => 'Win32');
     defineGetter(NP, 'vendor', () => firefox ? '' : 'Google Inc.');
     defineGetter(NP, 'maxTouchPoints', () => 0);
-    defineGetter(NP, 'hardwareConcurrency', () => Math.max(nativeCores, 8));
+    // Real core count: thread pools are sized from this, and claiming 8 cores on a 4-core phone
+    // makes multithreaded games spawn more threads than the CPU can run.
+    defineGetter(NP, 'hardwareConcurrency', () => nativeCores);
     if (firefox) {
       defineGetter(NP, 'oscpu', () => 'Windows NT 10.0; Win64; x64');
       defineGetter(NP, 'buildID', () => '20181001000000');
@@ -462,10 +465,14 @@
       } catch (e) { /* ignore */ }
       return null;
     }
+    const t0 = now();
     const out = new Uint8Array(w * h * depth * 4);
     for (let z = 0; z < depth; z++) {
       decodeS3TCImage(src, z * slice, w, h, fmt, new Uint32Array(out.buffer, z * w * h * 4, w * h));
     }
+    Perf.decodeMs += now() - t0;
+    Perf.decodeCount++;
+    Perf.decodeBytes += out.length;
     return out;
   }
 
@@ -474,7 +481,193 @@
     if (W.WebGLRenderingContext) targets.push([W.WebGLRenderingContext.prototype, false]);
     if (W.WebGL2RenderingContext) targets.push([W.WebGL2RenderingContext.prototype, true]);
     for (const [P, isGL2] of targets) patchGLPrototype(P, isGL2);
+    for (const [P] of targets) patchGLRenderScale(P);
+    for (const [P] of targets) patchGLDrawCounters(P);
+    patchCanvasRenderScale(W.HTMLCanvasElement && W.HTMLCanvasElement.prototype);
+    patchCanvasRenderScale(W.OffscreenCanvas && W.OffscreenCanvas.prototype);
     installGLReporting();
+  }
+
+  // ---- Render scale: the game asks for a canvas of W x H and gets a smaller real drawing buffer.
+  // Everything the game can observe (canvas.width, drawingBufferWidth, viewport, scissor) keeps
+  // reporting the size it asked for; only the pixels are fewer. Applied to canvases that get a
+  // WebGL context, so 2D canvases used for text and UI stay crisp. Unlike devicePixelRatio
+  // spoofing this reaches games that size their canvas from the window and games that render
+  // from a worker (OffscreenCanvas).
+  const RenderScale = {
+    factor: () => Math.max(0.25, Math.min(2, S.resScale || 1)),
+    requested: new WeakMap(),   // canvas -> { width, height } as set by the page
+    glCanvases: new WeakSet(),  // canvases that own a WebGL context (only these are scaled)
+    native: new WeakMap()       // prototype -> original accessors
+  };
+  function scaledPx(v) {
+    return Math.max(1, Math.round(v * RenderScale.factor()));
+  }
+  function patchCanvasRenderScale(proto) {
+    if (!proto) return;
+    const acc = {};
+    for (const prop of ['width', 'height']) {
+      const d = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!d || typeof d.get !== 'function' || typeof d.set !== 'function') return;
+      acc[prop] = d;
+    }
+    RenderScale.native.set(proto, acc);
+    for (const prop of ['width', 'height']) {
+      const d = acc[prop];
+      Object.defineProperty(proto, prop, {
+        configurable: true,
+        enumerable: d.enumerable,
+        get: function () {
+          const r = RenderScale.requested.get(this);
+          if (r && RenderScale.glCanvases.has(this) && r[prop] != null) return r[prop];
+          return d.get.call(this);
+        },
+        set: function (value) {
+          let n = Number(value);
+          n = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+          let r = RenderScale.requested.get(this);
+          if (!r) { r = {}; RenderScale.requested.set(this, r); }
+          r[prop] = n;
+          d.set.call(this, RenderScale.glCanvases.has(this) && RenderScale.factor() !== 1 ? scaledPx(n) : n);
+        }
+      });
+    }
+  }
+  // Called when a canvas gets its WebGL context: from now on its drawing buffer is scaled.
+  function markGLCanvas(canvas) {
+    if (!canvas || RenderScale.glCanvases.has(canvas) || RenderScale.factor() === 1) return;
+    const proto = Object.getPrototypeOf(canvas);
+    const acc = RenderScale.native.get(proto);
+    if (!acc) return;
+    RenderScale.glCanvases.add(canvas);
+    let r = RenderScale.requested.get(canvas);
+    if (!r) {
+      r = { width: acc.width.get.call(canvas), height: acc.height.get.call(canvas) };
+      RenderScale.requested.set(canvas, r);
+    }
+    try {
+      acc.width.set.call(canvas, scaledPx(r.width));
+      acc.height.set.call(canvas, scaledPx(r.height));
+    } catch (e) { /* a transferred canvas cannot be resized here */ }
+  }
+  function patchGLRenderScale(P) {
+    const o = {};
+    for (const k of ['viewport', 'scissor', 'bindFramebuffer', 'getParameter', 'blitFramebuffer']) {
+      if (typeof P[k] === 'function') o[k] = P[k];
+    }
+    if (!o.viewport || !o.scissor || !o.bindFramebuffer || !o.getParameter) return;
+    const FRAMEBUFFER = 0x8D40, DRAW_FRAMEBUFFER = 0x8CA9, READ_FRAMEBUFFER = 0x8CA8;
+    const VIEWPORT = 0x0BA2, SCISSOR_BOX = 0x0C10;
+    const bound = new WeakMap(); // gl -> { draw, read }
+    const fbs = (gl) => {
+      let b = bound.get(gl);
+      if (!b) { b = { draw: null, read: null }; bound.set(gl, b); }
+      return b;
+    };
+    const scaled = (gl) => RenderScale.factor() !== 1 && gl.canvas && RenderScale.glCanvases.has(gl.canvas);
+    const f = () => RenderScale.factor();
+
+    P.bindFramebuffer = function bindFramebuffer(target, fb) {
+      const b = fbs(this);
+      if (target === FRAMEBUFFER) { b.draw = fb || null; b.read = fb || null; }
+      else if (target === DRAW_FRAMEBUFFER) b.draw = fb || null;
+      else if (target === READ_FRAMEBUFFER) b.read = fb || null;
+      return o.bindFramebuffer.call(this, target, fb);
+    };
+    P.viewport = function viewport(x, y, w, h) {
+      if (scaled(this) && fbs(this).draw === null) {
+        const k = f();
+        return o.viewport.call(this, Math.round(x * k), Math.round(y * k), Math.round(w * k), Math.round(h * k));
+      }
+      return o.viewport.call(this, x, y, w, h);
+    };
+    P.scissor = function scissor(x, y, w, h) {
+      if (scaled(this) && fbs(this).draw === null) {
+        const k = f();
+        return o.scissor.call(this, Math.round(x * k), Math.round(y * k), Math.round(w * k), Math.round(h * k));
+      }
+      return o.scissor.call(this, x, y, w, h);
+    };
+    const prevGetParameter = P.getParameter;
+    P.getParameter = function getParameter(pname) {
+      const v = prevGetParameter.call(this, pname);
+      if ((pname === VIEWPORT || pname === SCISSOR_BOX) && v && scaled(this) && fbs(this).draw === null) {
+        const k = f();
+        const out = new Int32Array(4);
+        for (let i = 0; i < 4; i++) out[i] = Math.round(v[i] / k);
+        return out;
+      }
+      return v;
+    };
+    if (o.blitFramebuffer) {
+      P.blitFramebuffer = function blitFramebuffer(sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter) {
+        if (scaled(this)) {
+          const b = fbs(this);
+          const k = f();
+          if (b.read === null) { sx0 = Math.round(sx0 * k); sy0 = Math.round(sy0 * k); sx1 = Math.round(sx1 * k); sy1 = Math.round(sy1 * k); }
+          if (b.draw === null) { dx0 = Math.round(dx0 * k); dy0 = Math.round(dy0 * k); dx1 = Math.round(dx1 * k); dy1 = Math.round(dy1 * k); }
+        }
+        return o.blitFramebuffer.call(this, sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1, mask, filter);
+      };
+    }
+    for (const prop of ['drawingBufferWidth', 'drawingBufferHeight']) {
+      const d = Object.getOwnPropertyDescriptor(P, prop);
+      if (!d || typeof d.get !== 'function') continue;
+      const dim = prop === 'drawingBufferWidth' ? 'width' : 'height';
+      Object.defineProperty(P, prop, {
+        configurable: true,
+        enumerable: d.enumerable,
+        get: function () {
+          const real = d.get.call(this);
+          if (!scaled(this)) return real;
+          const r = RenderScale.requested.get(this.canvas);
+          return r && r[dim] != null ? r[dim] : Math.round(real / f());
+        }
+      });
+    }
+  }
+  function patchGLDrawCounters(P) {
+    for (const k of ['drawArrays', 'drawElements', 'drawArraysInstanced', 'drawElementsInstanced', 'drawRangeElements']) {
+      const orig = P[k];
+      if (typeof orig !== 'function') continue;
+      P[k] = function () {
+        Perf.draws++;
+        return orig.apply(this, arguments);
+      };
+    }
+  }
+
+  // Frames (requestAnimationFrame callbacks), draw calls and S3TC decode time, sent every 2 s
+  // once a WebGL context exists, so the Status tab can show where the time goes.
+  function startPerfSampler() {
+    if (Perf.started) return;
+    Perf.started = true;
+    const origRaf = W.requestAnimationFrame;
+    if (typeof origRaf === 'function') {
+      W.requestAnimationFrame = function requestAnimationFrame(cb) {
+        return origRaf.call(W, function (ts) {
+          Perf.frames++;
+          return cb.apply(this, arguments);
+        });
+      };
+    }
+    let lastT = now(), lastFrames = 0, lastDraws = 0, lastDecode = 0;
+    setInterval(() => {
+      const t = now();
+      const dt = Math.max(1, t - lastT) / 1000;
+      const msg = {
+        t: 'perf',
+        fps: (Perf.frames - lastFrames) / dt,
+        draws: (Perf.draws - lastDraws) / dt,
+        decodeMsPerSec: (Perf.decodeMs - lastDecode) / dt,
+        decodeCount: Perf.decodeCount,
+        decodeMB: Perf.decodeBytes / 1048576,
+        scale: RenderScale.factor(),
+        worker: IS_WORKER
+      };
+      lastT = t; lastFrames = Perf.frames; lastDraws = Perf.draws; lastDecode = Perf.decodeMs;
+      Native.post(msg);
+    }, 2000);
   }
 
   function patchGLPrototype(P, isGL2) {
@@ -733,7 +926,12 @@
       const orig = proto.getContext;
       proto.getContext = function getContext(type) {
         const ctx = orig.apply(this, arguments);
-        if (ctx && !reported && typeof type === 'string' && /^(webgl2?|experimental-webgl)$/i.test(type)) {
+        const isGL = ctx && typeof type === 'string' && /^(webgl2?|experimental-webgl)$/i.test(type);
+        if (isGL) {
+          guard('render scale', () => markGLCanvas(this));
+          guard('perf sampler', startPerfSampler);
+        }
+        if (isGL && !reported) {
           reported = true;
           setTimeout(() => {
             try {
@@ -1115,7 +1313,7 @@
         base = nativeDpr();
         if (IS_TOP && W.visualViewport && W.visualViewport.scale > 0) base *= W.visualViewport.scale;
       }
-      return Math.max(0.25, base * S.resScale);
+      return Math.max(0.25, base);
     };
     try {
       Object.defineProperty(W, 'devicePixelRatio', {
@@ -1967,7 +2165,10 @@
       releaseAll('pad');
       syncGamepadEvents();
     }
-    if (prevScale !== S.resScale) Display.notify();
+    if (prevScale !== S.resScale) {
+      Display.notify();
+      Native.post({ t: 'perf', scale: RenderScale.factor(), worker: IS_WORKER });
+    }
     schedule();
   }
 
@@ -2085,7 +2286,8 @@
     W.__radiantInternals = {
       S: S, Input: Input, Lock: Lock, Status: Status, Display: Display, Native: Native,
       onNativeMessage: onNativeMessage, decodeS3TC: decodeS3TC, S3TC_FORMATS: S3TC_FORMATS,
-      isOwner: isOwner, IDENTITY: IDENTITY, workerScriptUrl: workerScriptUrl, WORKER_MARKER: WORKER_MARKER
+      isOwner: isOwner, IDENTITY: IDENTITY, workerScriptUrl: workerScriptUrl, WORKER_MARKER: WORKER_MARKER,
+      RenderScale: RenderScale, Perf: Perf
     };
   }
 })();

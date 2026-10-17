@@ -55,6 +55,8 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         fun isCursorEnabled(): Boolean
         fun statusItems(): List<StatusItem>
         fun crashReport(): CrashLog.Report?
+        fun graphicsBackendText(): String
+        fun openWebViewDevTools()
         fun copyCrashReport()
         fun clearCrashReport()
         fun requestCloseDrawer()
@@ -505,11 +507,11 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         pageTitle(col, "Display", null)
         section(col, "Resolution")
         col.addView(segmented(
-            listOf("1.0" to "100%", "0.75" to "75%", "0.5" to "50%"),
+            listOf("1.0" to "100%", "0.75" to "75%", "0.5" to "50%", "0.35" to "35%"),
             { trimScale(prefs.resolutionScale) },
-            { prefs.resolutionScale = it.toFloat(); host.onSettingsChanged(false) }
+            { prefs.resolutionScale = it.toFloat(); host.onSettingsChanged(true) }
         ), lp(top = 8f))
-        note(col, "Lower renders fewer pixels and runs faster. Reload if a game keeps its old size.")
+        note(col, "The game draws fewer pixels and the screen scales them up. 50% is four times fewer pixels than 100%: the biggest speed-up there is on a phone. Reloads the page.")
 
         section(col, "Page width")
         col.addView(segmented(
@@ -527,6 +529,15 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
             { prefs.identity = it; host.onIdentityChanged() }
         ), lp(top = 8f))
         note(col, "What sites are told this browser is, all on Windows 11 except Android. Chrome matches the real engine and works best. Reloads the page.")
+
+        section(col, "Graphics engine")
+        val backendText = body("")
+        refreshers.add { backendText.text = "Now: " + host.graphicsBackendText() }
+        col.addView(backendText, lp(top = 6f))
+        note(col, "WebGL runs on the GPU driver that Android System WebView picks; this app cannot switch it. " +
+            "WebView DevTools (part of Android System WebView) has a Flags page where \"WebViewVulkan\" turns on Vulkan compositing " +
+            "for every WebView app. It can crash on unsupported devices, and it does not make the game itself draw with Vulkan.")
+        col.addView(chip("Open WebView DevTools") { host.openWebViewDevTools() }, lp(top = 8f))
 
         section(col, "Multithreading")
         col.addView(toggleRow("Turn on when a site asks", "Sites that request shared memory get it and reload once",
@@ -1100,7 +1111,8 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
     private fun trimScale(v: Float): String = when {
         v >= 0.99f -> "1.0"
         v >= 0.74f -> "0.75"
-        else -> "0.5"
+        v >= 0.49f -> "0.5"
+        else -> "0.35"
     }
 
     companion object {
@@ -1118,6 +1130,7 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
             Bookmark("Radiant Catalog", "RC", "https://radiantoptimizer.games"),
             Bookmark("Radiant Full Index", "RI", "https://radiantoptimizer.lol"),
             Bookmark("BO1 Zombies Hub", "BO", "https://vel.gg/bo1z"),
+            Bookmark("The Simpsons: Hit & Run", "SH", "https://shar-wasm.cjoseph.workers.dev/?skipmovie"),
             Bookmark("Quake 1 Arena", "Q1", "https://q1.pieter.com"),
             Bookmark("Quake 2 Arena", "Q2", "https://q2.pieter.com"),
             Bookmark("Return to Castle Wolfenstein", "RW", "https://rtcw.pieter.com"),
