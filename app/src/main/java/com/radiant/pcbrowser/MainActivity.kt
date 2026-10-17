@@ -1193,7 +1193,8 @@ class MainActivity : ComponentActivity(),
     private fun graphicsBackend(): Pair<String, Int> {
         val r = glRenderer.lowercase(Locale.ROOT)
         return when {
-            r.isEmpty() -> "Unknown until a game starts" to CommandDrawer.LEVEL_INFO
+            r.isEmpty() && glStatus.isEmpty() -> "Unknown until a game starts" to CommandDrawer.LEVEL_INFO
+            r.isEmpty() -> "This WebView does not say (renderer name hidden)" to CommandDrawer.LEVEL_INFO
             r.contains("swiftshader") || r.contains("llvmpipe") || r.contains("software") ->
                 "Software rendering (no GPU). Games will be very slow." to CommandDrawer.LEVEL_BAD
             r.contains("vulkan") -> "Vulkan (through ANGLE)" to CommandDrawer.LEVEL_OK
