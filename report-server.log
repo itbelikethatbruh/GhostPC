@@ -1,0 +1,9 @@
+report-server: "GET /index.html HTTP/1.1" 200 -
+report-server: "GET /index.html HTTP/1.1" 200 -
+report-server: "GET /probe.js HTTP/1.1" 200 -
+report-server: "HEAD /index.html HTTP/1.1" 200 -
+report-server: code 404, message File not found
+report-server: "GET /favicon.ico HTTP/1.1" 404 -
+report-server: "GET /probe.js?v=1 HTTP/1.1" 200 -
+report-server: "GET /helper.js HTTP/1.1" 200 -
+report-server: "POST /result HTTP/1.1" 204 -
