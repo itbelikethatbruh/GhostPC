@@ -45,7 +45,7 @@ import re, sys
 import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
 for node in root.iter("node"):
-    if node.get("content-desc") == sys.argv[2]:
+    if node.get("content-desc") == sys.argv[2] or node.get("text") == sys.argv[2]:
         x1, y1, x2, y2 = map(int, re.findall(r"\d+", node.get("bounds", "")))
         print((x1 + x2) // 2, (y1 + y2) // 2)
         break
@@ -84,6 +84,25 @@ shot "01-launch"
 sleep 20
 crashed && fail "The app crashed during start-up"
 alive || fail "The app is not running after start-up"
+
+echo "== First-launch intro and tour"
+shot "02-intro-1"
+for i in 2 3 4 5; do
+  adb shell input keyevent KEYCODE_DPAD_RIGHT
+  sleep 1.2
+  shot "02-intro-$i"
+done
+tap_desc "Show me around" || adb shell input keyevent KEYCODE_BUTTON_A
+sleep 1.5
+shot "02-tour-1"
+for i in 2 3 4; do
+  tap_desc "Next" || adb shell input keyevent KEYCODE_BUTTON_A
+  sleep 1
+  shot "02-tour-$i"
+done
+tap_desc "Done" || adb shell input keyevent KEYCODE_BUTTON_A
+sleep 1.5
+crashed && fail "The app crashed in the intro or tour"
 shot "02-home"
 
 echo "== Menu over the start page"
@@ -101,7 +120,7 @@ close_dialogs
 adb shell input keyevent KEYCODE_BACK
 sleep 2
 shot "04-menu-games"
-for tab in Controls Display Buttons Status; do
+for tab in Watch Controls Display Buttons Shield Status; do
   if tap_desc "$tab"; then
     sleep 1.5
     shot "05-menu-$(echo "$tab" | tr '[:upper:]' '[:lower:]')"

@@ -25,6 +25,21 @@ Switching keys means uninstalling the old build once.
 
 Local build: `./gradlew assembleRelease`, with JDK 17 and the Android SDK (API 36) installed.
 
+## First launch
+
+A short swipe-through introduction explains what the app does, then an optional tour points out the menu button, the controller shortcuts, the cursor and the library. Both can be replayed from Menu > Status. Everything in them works from a controller: LB / RB or the D-pad move between pages, A continues, B skips.
+
+## Library
+
+- **Games** holds the game hubs (Radiant, vel.gg, the pieter.com Quake ports, WebXash, Diablo, The Simpsons: Hit & Run ...).
+- **Watch** holds free, legal movie and TV services (Tubi, Pluto TV, The Roku Channel, Plex, Crackle, Xumo Play, YouTube Movies, Internet Archive). If a player refuses to start, switch *Browser identity* to Android in Display.
+- **Add this site** on either tab saves the page you are on; saved sites are allowed to redirect and open pop-ups like the built-in hubs. A saved tile has an X to remove it.
+
+## Shield
+
+- **Ads and trackers:** every request a page makes is checked against a bundled list of about 73,000 ad, tracking and malware domains ([StevenBlack/hosts](https://github.com/StevenBlack/hosts), MIT; see THIRD_PARTY.md). Blocked requests get an empty response, so nothing is fetched. The Shield tab shows the count for the current page and the last domains blocked. Switch it off there if a site breaks.
+- **Redirects and pop-ups:** a page cannot navigate you somewhere else unless you tapped a link; pop-ups, casino portals and `intent:` / `market:` jumps are stopped and shown in a banner with a one-tap *Always allow* for the site. The Shield tab lists the sites you allowed and lets you take them back.
+
 ## Controls
 
 **Anywhere**

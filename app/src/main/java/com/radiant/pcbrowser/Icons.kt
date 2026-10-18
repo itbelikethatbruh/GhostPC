@@ -17,7 +17,7 @@ class Icon(context: Context, private val kind: Kind, color: Int, sizeDp: Float =
 
     enum class Kind {
         BACK, FORWARD, RELOAD, CLOSE, MENU, LOCK, GLOBE, GAMES, GAMEPAD, DISPLAY, BUTTONS,
-        STATUS, POWER, CHECK, THREADS, CHEVRON
+        STATUS, POWER, CHECK, THREADS, CHEVRON, SHIELD, FILM, PLUS, CURSOR
     }
 
     private val sizePx = Ui.dp(context, sizeDp)
@@ -117,6 +117,28 @@ class Icon(context: Context, private val kind: Kind, color: Int, sizeDp: Float =
                 p.moveTo(12f, 3.5f); p.lineTo(12f, 11.5f)
             }
             Kind.CHECK -> { p.moveTo(5f, 12.5f); p.lineTo(10f, 17.5f); p.lineTo(19f, 7f) }
+            Kind.SHIELD -> {
+                p.moveTo(12f, 3f); p.lineTo(19.5f, 6f); p.lineTo(19.5f, 11.5f)
+                p.cubicTo(19.5f, 16f, 16.5f, 19.5f, 12f, 21f)
+                p.cubicTo(7.5f, 19.5f, 4.5f, 16f, 4.5f, 11.5f)
+                p.lineTo(4.5f, 6f); p.close()
+                p.moveTo(8.8f, 12f); p.lineTo(11f, 14.2f); p.lineTo(15.4f, 9.8f)
+            }
+            Kind.FILM -> {
+                p.addRoundRect(RectF(3.5f, 5f, 20.5f, 19f), 2f, 2f, Path.Direction.CW)
+                p.moveTo(7.5f, 5f); p.lineTo(7.5f, 19f)
+                p.moveTo(16.5f, 5f); p.lineTo(16.5f, 19f)
+                for (y in floatArrayOf(8.5f, 12f, 15.5f)) {
+                    p.moveTo(3.5f, y); p.lineTo(7.5f, y)
+                    p.moveTo(16.5f, y); p.lineTo(20.5f, y)
+                }
+                f.moveTo(10.5f, 9f); f.lineTo(14.2f, 12f); f.lineTo(10.5f, 15f); f.close()
+            }
+            Kind.PLUS -> { p.moveTo(12f, 5f); p.lineTo(12f, 19f); p.moveTo(5f, 12f); p.lineTo(19f, 12f) }
+            Kind.CURSOR -> {
+                f.moveTo(6f, 4f); f.lineTo(6f, 18.5f); f.lineTo(9.8f, 15f); f.lineTo(12.4f, 20.5f)
+                f.lineTo(15f, 19.3f); f.lineTo(12.4f, 13.9f); f.lineTo(17.5f, 13.6f); f.close()
+            }
             Kind.THREADS -> {
                 p.addRoundRect(RectF(7f, 7f, 17f, 17f), 2f, 2f, Path.Direction.CW)
                 for (x in floatArrayOf(10f, 14f)) {

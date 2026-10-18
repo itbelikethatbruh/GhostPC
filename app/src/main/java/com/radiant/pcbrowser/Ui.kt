@@ -6,7 +6,10 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.StateListDrawable
+import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
+import android.widget.TextView
 import kotlin.math.roundToInt
 
 /**
@@ -110,6 +113,86 @@ object Ui {
             setLayerGravity(1, Gravity.END or Gravity.FILL_VERTICAL)
             setLayerWidth(1, dp(context, 2f))
         }
+    }
+
+    const val FACE_A: Int = 0xFF5BE49B.toInt()
+    const val FACE_B: Int = 0xFFFF6B7A.toInt()
+    const val FACE_Y: Int = 0xFFFFC857.toInt()
+
+    /** Controller button badge: ABXY in their Xbox colours, everything else as an outlined pill. */
+    fun glyph(context: Context, label: String, face: Int = 0, small: Boolean = false): TextView = TextView(context).apply {
+        text = label
+        typeface = DISPLAY
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, if (small) 10.5f else 13f)
+        gravity = Gravity.CENTER
+        val h = dp(context, if (small) 20f else 28f)
+        minHeight = h
+        minWidth = h
+        if (face != 0) {
+            setTextColor(face)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor((face and 0x00FFFFFF) or 0x2E000000)
+                setStroke(dp(context, 1.5f), face)
+            }
+            setPadding(0, 0, 0, 0)
+        } else {
+            setTextColor(if (small) TEXT_DIM else TEXT)
+            background = rounded(context, 0x00000000, if (small) 6f else 9f, TEXT_FAINT, 1f)
+            setPadding(dp(context, if (small) 5f else 8f), 0, dp(context, if (small) 5f else 8f), 0)
+        }
+    }
+
+    /** Keyboard key cap, used where a controller button is shown mapped to a key. */
+    fun keyCap(context: Context, label: String): TextView = TextView(context).apply {
+        text = label
+        typeface = LABEL
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setTextColor(TEXT)
+        gravity = Gravity.CENTER
+        minHeight = dp(context, 30f)
+        minWidth = dp(context, 30f)
+        setPadding(dp(context, 10f), 0, dp(context, 10f), 0)
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = dp(context, 7f).toFloat()
+            setColor(SURFACE_HI)
+            setStroke(dp(context, 1f), 0x33FFFFFF)
+        }
+    }
+
+    /** Primary (accent) or quiet pill button; focusable for the D-pad. */
+    fun pillButton(context: Context, label: String, primary: Boolean, onClick: () -> Unit): TextView = TextView(context).apply {
+        text = label
+        typeface = LABEL
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setTextColor(if (primary) android.graphics.Color.WHITE else TEXT)
+        gravity = Gravity.CENTER
+        minHeight = dp(context, 48f)
+        setPadding(dp(context, 26f), 0, dp(context, 26f), 0)
+        background = focusable(context, primary, 24f, if (primary) ACCENT else SURFACE)
+        isFocusable = true
+        isClickable = true
+        setOnClickListener { onClick() }
+    }
+
+    /** Small check-marked feature line. */
+    fun featureRow(context: Context, text: String): View {
+        val row = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(android.widget.ImageView(context).apply { setImageDrawable(Icon(context, Icon.Kind.CHECK, OK, 18f)) },
+            android.widget.LinearLayout.LayoutParams(dp(context, 18f), dp(context, 18f)))
+        row.addView(TextView(context).apply {
+            this.text = text
+            setTextColor(TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f)
+            typeface = BODY
+        }, android.widget.LinearLayout.LayoutParams(0, android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
+            it.marginStart = dp(context, 12f)
+        })
+        return row
     }
 
     /** Deterministic two-tone tile for a site monogram. */

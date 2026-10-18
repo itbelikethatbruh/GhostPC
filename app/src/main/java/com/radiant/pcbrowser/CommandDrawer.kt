@@ -57,20 +57,31 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         fun crashReport(): CrashLog.Report?
         fun graphicsBackendText(): String
         fun openWebViewDevTools()
+        fun addBookmark(section: String): Boolean
+        fun removeBookmark(section: String, url: String)
+        fun isAdBlockEnabled(): Boolean
+        fun setAdBlockEnabled(enabled: Boolean)
+        fun adBlockSummary(): String
+        fun allowedSites(): List<String>
+        fun removeAllowedSite(host: String)
+        fun showIntro()
+        fun showTour()
         fun copyCrashReport()
         fun clearCrashReport()
         fun requestCloseDrawer()
     }
 
-    data class Bookmark(val title: String, val monogram: String, val url: String)
+    data class Bookmark(val title: String, val monogram: String, val url: String, val custom: Boolean = false)
 
     data class StatusItem(val label: String, val value: String, val level: Int)
 
     private enum class Tab(val label: String, val icon: Icon.Kind) {
         GAMES("Games", Icon.Kind.GAMES),
+        WATCH("Watch", Icon.Kind.FILM),
         CONTROLS("Controls", Icon.Kind.GAMEPAD),
         DISPLAY("Display", Icon.Kind.DISPLAY),
         BUTTONS("Buttons", Icon.Kind.BUTTONS),
+        SHIELD("Shield", Icon.Kind.SHIELD),
         STATUS("Status", Icon.Kind.STATUS)
     }
 
@@ -98,6 +109,10 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
     private lateinit var forwardButton: ImageView
     private lateinit var closeButton: ImageView
     private lateinit var siteBox: LinearLayout
+    private lateinit var gamesBox: LinearLayout
+    private lateinit var watchBox: LinearLayout
+    private lateinit var shieldBox: LinearLayout
+    private lateinit var allowedBox: LinearLayout
     private lateinit var threadListBox: LinearLayout
     private lateinit var statusBox: LinearLayout
 
@@ -211,6 +226,8 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         refreshNav()
         refreshSite()
         refreshThreadList()
+        refreshLibrary()
+        refreshShield()
         refreshStatus()
     }
 
@@ -370,6 +387,8 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
             }
             when (tab) {
                 Tab.GAMES -> buildGames(col)
+                Tab.WATCH -> buildWatch(col)
+                Tab.SHIELD -> buildShield(col)
                 Tab.CONTROLS -> buildControls(col)
                 Tab.DISPLAY -> buildDisplay(col)
                 Tab.BUTTONS -> buildButtons(col)
@@ -394,18 +413,94 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
             setPadding(dp(14f), dp(14f), dp(14f), dp(10f))
         }
         col.addView(siteBox, lp(top = 12f))
-        section(col, "Game hubs")
+        sectionWithAction(col, "Game hubs", "Add this site") {
+            if (host.addBookmark(SECTION_GAMES)) refreshLibrary()
+        }
+        gamesBox = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(gamesBox)
+    }
+
+    private fun buildWatch(col: LinearLayout) {
+        pageTitle(col, "Watch", "Free, legal movie and TV services. Add any site you use with \"Add this site\".")
+        sectionWithAction(col, "Movies and TV", "Add this site") {
+            if (host.addBookmark(SECTION_WATCH)) refreshLibrary()
+        }
+        watchBox = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(watchBox)
+        note(col, "If a video site refuses to play, switch Browser identity to Android in Display: some players check for a phone before they start.")
+    }
+
+    private fun buildShield(col: LinearLayout) {
+        pageTitle(col, "Shield", null)
+        section(col, "Ads and trackers")
+        col.addView(toggleRow("Block ads and trackers", "Requests to known ad and tracking domains never leave the phone",
+            get = { host.isAdBlockEnabled() }, set = { host.setAdBlockEnabled(it); refreshShield() }), lp(top = 8f))
+        shieldBox = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = Ui.rounded(context, Ui.SURFACE, 14f)
+            setPadding(dp(14f), dp(10f), dp(14f), dp(10f))
+        }
+        col.addView(shieldBox, lp(top = 8f))
+
+        section(col, "Redirects and pop-ups")
+        note(col, "Pages cannot send you somewhere else unless you tapped a link. Pop-ups, casino portals and app-store " +
+            "jumps are stopped and shown in a banner, where one tap allows the site for good. Sites you allowed:")
+        allowedBox = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(allowedBox, lp(top = 6f))
+    }
+
+    private fun refreshLibrary() {
+        if (!::gamesBox.isInitialized || !::watchBox.isInitialized) return
+        fillTiles(gamesBox, BOOKMARKS + prefs.bookmarks(SECTION_GAMES), SECTION_GAMES)
+        fillTiles(watchBox, WATCH_BOOKMARKS + prefs.bookmarks(SECTION_WATCH), SECTION_WATCH)
+    }
+
+    private fun fillTiles(box: LinearLayout, list: List<Bookmark>, section: String) {
+        box.removeAllViews()
         var row: LinearLayout? = null
-        BOOKMARKS.forEachIndexed { i, b ->
+        list.forEachIndexed { i, b ->
             if (i % 2 == 0) {
                 row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                col.addView(row, lp(top = 8f))
+                box.addView(row, lp(top = 8f))
             }
-            row?.addView(tile(b), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
+            row?.addView(tile(b, section), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also {
                 if (i % 2 == 0) it.marginEnd = dp(8f)
             })
         }
-        if (BOOKMARKS.size % 2 == 1) row?.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+        if (list.size % 2 == 1) row?.addView(View(context), LinearLayout.LayoutParams(0, 1, 1f))
+    }
+
+    private fun refreshShield() {
+        if (!::shieldBox.isInitialized) return
+        shieldBox.removeAllViews()
+        shieldBox.addView(body(host.adBlockSummary()))
+        allowedBox.removeAllViews()
+        val sites = host.allowedSites()
+        if (sites.isEmpty()) {
+            allowedBox.addView(body("None yet."))
+            return
+        }
+        for (site in sites) {
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(14f), dp(2f), dp(4f), dp(2f))
+                background = Ui.rounded(context, Ui.SURFACE, 14f)
+            }
+            row.addView(TextView(context).apply {
+                text = site
+                setTextColor(Ui.TEXT)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(iconButton(Icon.Kind.CLOSE, "Stop allowing $site", 40f) {
+                host.removeAllowedSite(site)
+                refreshShield()
+                refreshSite()
+            })
+            allowedBox.addView(row, lp(top = 6f))
+        }
     }
 
     private fun refreshSite() {
@@ -653,7 +748,13 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
             row.addView(body(what), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             col.addView(row)
         }
-        col.addView(chip("Close the app") { host.exitApp() }, lp(top = 18f))
+        val again = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        again.addView(chip("Show the intro") { host.showIntro() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginEnd = dp(8f) })
+        again.addView(chip("Show the tour") { host.showTour() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        col.addView(again, lp(top = 18f))
+        col.addView(chip("Close the app") { host.exitApp() }, lp(top = 8f))
     }
 
     // ============================================================================ key picker
@@ -771,6 +872,40 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         if (subtitle != null) col.addView(body(subtitle), lp(top = 2f))
     }
 
+    private fun sectionWithAction(col: LinearLayout, title: String, action: String, onClick: () -> Unit): View {
+        val row = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        row.addView(TextView(context).apply {
+            text = title
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f)
+            typeface = Ui.TITLE
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val add = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.focusable(context, radiusDp = 16f)
+            setPadding(dp(10f), dp(6f), dp(14f), dp(6f))
+            isFocusable = true
+            isClickable = true
+            contentDescription = action
+            setOnClickListener { onClick() }
+        }
+        add.addView(ImageView(context).apply { setImageDrawable(Icon(context, Icon.Kind.PLUS, Ui.TEXT, 16f)) },
+            LinearLayout.LayoutParams(dp(16f), dp(16f)))
+        add.addView(TextView(context).apply {
+            text = action
+            setTextColor(Ui.TEXT)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Ui.LABEL
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also { it.marginStart = dp(6f) })
+        row.addView(add)
+        col.addView(row, lp(top = 22f))
+        return row
+    }
+
     private fun section(col: LinearLayout, title: String) {
         col.addView(TextView(context).apply {
             text = title
@@ -822,7 +957,7 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         setOnClickListener { onClick() }
     }
 
-    private fun tile(b: Bookmark): View {
+    private fun tile(b: Bookmark, section: String = SECTION_GAMES): View {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -858,6 +993,12 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
             ellipsize = TextUtils.TruncateAt.END
         })
         row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).also { it.marginStart = dp(12f) })
+        if (b.custom) {
+            row.addView(iconButton(Icon.Kind.CLOSE, "Remove " + b.title, 36f) {
+                host.removeBookmark(section, b.url)
+                refreshLibrary()
+            })
+        }
         return row
     }
 
@@ -1125,6 +1266,21 @@ class CommandDrawer(private val context: Context, private val prefs: Prefs, priv
         const val LEVEL_WARN = 1
         const val LEVEL_BAD = 2
         const val LEVEL_INFO = 3
+
+        const val SECTION_GAMES = "games"
+        const val SECTION_WATCH = "watch"
+
+        /** Free, ad-supported services that stream legally. */
+        val WATCH_BOOKMARKS = listOf(
+            Bookmark("Tubi", "TU", "https://tubitv.com"),
+            Bookmark("Pluto TV", "PL", "https://pluto.tv"),
+            Bookmark("The Roku Channel", "RO", "https://therokuchannel.roku.com"),
+            Bookmark("Plex (free movies and TV)", "PX", "https://watch.plex.tv"),
+            Bookmark("Crackle", "CR", "https://www.crackle.com"),
+            Bookmark("Xumo Play", "XU", "https://play.xumo.com"),
+            Bookmark("YouTube Movies and TV", "YT", "https://www.youtube.com/feed/storefront"),
+            Bookmark("Internet Archive films", "IA", "https://archive.org/details/movies")
+        )
 
         val BOOKMARKS = listOf(
             Bookmark("Radiant Catalog", "RC", "https://radiantoptimizer.games"),

@@ -81,7 +81,10 @@ class MainActivity : ComponentActivity(),
     private lateinit var drawer: CommandDrawer
     private lateinit var menuButton: View
     private lateinit var isolation: IsolationManager
+    private lateinit var adBlocker: AdBlocker
     private var splash: SplashView? = null
+    private var intro: IntroView? = null
+    private var tour: TourOverlay? = null
     private lateinit var banner: LinearLayout
     private lateinit var bannerText: TextView
     private lateinit var bannerAllowOnce: TextView
@@ -172,6 +175,7 @@ class MainActivity : ComponentActivity(),
         prefs = Prefs(this)
         shield = NavigationShield(prefs)
         isolation = IsolationManager(prefs)
+        adBlocker = AdBlocker(this, prefs)
         shimSource = resources.openRawResource(R.raw.pc_engine_shim).bufferedReader().use { it.readText() }
         resolveEngineVersions()
 
@@ -208,14 +212,14 @@ class MainActivity : ComponentActivity(),
         controller = ControllerManager(this, this)
         controller.setVirtualPadEnabled(prefs.touchGamepad)
 
-        val intro = SplashView(this) {
+        val launch = SplashView(this) {
             splash?.let { root.removeView(it) }
             splash = null
-            if (!drawer.isOpen) webView?.requestFocus()
+            if (!prefs.introDone) showIntro() else if (!drawer.isOpen) webView?.requestFocus()
         }
-        splash = intro
-        root.addView(intro, matchParent())
-        intro.start()
+        splash = launch
+        root.addView(launch, matchParent())
+        launch.start()
 
         root.setOnApplyWindowInsetsListener { _, insets ->
             applyCutout(insets)
@@ -226,6 +230,8 @@ class MainActivity : ComponentActivity(),
             override fun handleOnBackPressed() {
                 when {
                     splash != null -> splash?.requestSkip()
+                    intro != null -> intro?.handleKey(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BUTTON_B))
+                    tour != null -> tour?.handleKey(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BUTTON_B))
                     drawer.isOpen -> if (!drawer.handleBack()) closeDrawer()
                     else -> openDrawer(fromController = false)
                 }
@@ -291,6 +297,8 @@ class MainActivity : ComponentActivity(),
             if (event.action == KeyEvent.ACTION_UP) it.requestSkip()
             if (event.keyCode != KeyEvent.KEYCODE_VOLUME_UP && event.keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return true
         }
+        intro?.let { if (it.handleKey(event)) return true; return super.dispatchKeyEvent(event) }
+        tour?.let { if (it.handleKey(event)) return true; return super.dispatchKeyEvent(event) }
         if (::controller.isInitialized && controller.handleKeyEvent(event)) return true
         return super.dispatchKeyEvent(event)
     }
@@ -470,7 +478,9 @@ class MainActivity : ComponentActivity(),
 
         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
             val host = request.url.host ?: return null
-            if (shield.isAdHost(host)) {
+            // The big list applies to what pages load, not to where the user navigates.
+            if (shield.isAdHost(host) || (!request.isForMainFrame && adBlocker.isBlocked(host))) {
+                if (!request.isForMainFrame) adBlocker.recordBlocked(host)
                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
             }
             if (WorkerScripts.isMarked(request)) {
@@ -487,6 +497,7 @@ class MainActivity : ComponentActivity(),
             glStatus = ""
             glRenderer = ""
             perfStatus = ""
+            adBlocker.pageStarted()
             if (!docStartSupported) view.evaluateJavascript(buildScript(), null)
             updateCursorState()
             updatePointerCapture()
@@ -1204,6 +1215,110 @@ class MainActivity : ComponentActivity(),
     }
 
     override fun graphicsBackendText(): String = graphicsBackend().first
+
+    override fun addBookmark(section: String): Boolean {
+        val url = webView?.url ?: return false
+        val uri = Uri.parse(url)
+        val host = uri.host ?: return false
+        if (!(url.startsWith("http://") || url.startsWith("https://"))) return false
+        val existing = prefs.bookmarks(section)
+        val builtIn = if (section == CommandDrawer.SECTION_WATCH) CommandDrawer.WATCH_BOOKMARKS else CommandDrawer.BOOKMARKS
+        if ((existing + builtIn).any { it.url == url }) {
+            toast("Already saved")
+            return false
+        }
+        val title = webView?.title?.takeIf { it.isNotBlank() && !it.startsWith("http") } ?: host
+        val label = host.removePrefix("www.")
+        val monogram = label.split('.').first().take(2).uppercase(Locale.ROOT).ifEmpty { "+" }
+        prefs.setBookmarks(section, existing + CommandDrawer.Bookmark(title.take(60), monogram, url, custom = true))
+        // Saved sites may redirect and open pop-ups like the built-in hubs.
+        shield.allowAlways(host)
+        toast("Saved " + label)
+        return true
+    }
+
+    override fun removeBookmark(section: String, url: String) {
+        prefs.setBookmarks(section, prefs.bookmarks(section).filter { it.url != url })
+    }
+
+    override fun isAdBlockEnabled(): Boolean = adBlocker.enabled
+
+    override fun setAdBlockEnabled(enabled: Boolean) {
+        adBlocker.enabled = enabled
+    }
+
+    override fun adBlockSummary(): String {
+        if (!adBlocker.enabled) return "Off. Pages load every ad and tracker they ask for."
+        val n = adBlocker.blockedOnPage.get()
+        val sb = StringBuilder()
+        sb.append(if (adBlocker.ready) String.format(Locale.US, "%,d domains on the list.", adBlocker.listSize) else "Loading the list.")
+        sb.append(if (n == 0) " Nothing blocked on this page yet." else " Blocked $n request" + (if (n == 1) "" else "s") + " on this page.")
+        val recent = adBlocker.recentBlocked()
+        if (recent.isNotEmpty()) sb.append("\n\n").append(recent.joinToString("\n"))
+        return sb.toString()
+    }
+
+    override fun allowedSites(): List<String> = prefs.userAllowedHosts.sorted()
+
+    override fun removeAllowedSite(host: String) {
+        shield.removeAlways(host)
+    }
+
+    override fun showIntro() {
+        closeDrawer()
+        showIntroScreen()
+    }
+
+    override fun showTour() {
+        closeDrawer()
+        startTour()
+    }
+
+    private fun showIntroScreen() {
+        if (intro != null) return
+        val view = IntroView(this) { startTourAfter ->
+            intro?.let { root.removeView(it) }
+            intro = null
+            prefs.introDone = true
+            webView?.isFocusable = true
+            webView?.isFocusableInTouchMode = true
+            if (startTourAfter) startTour() else webView?.requestFocus()
+        }
+        intro = view
+        webView?.isFocusable = false
+        webView?.isFocusableInTouchMode = false
+        root.addView(view, matchParent())
+        view.focusFirst()
+    }
+
+    private fun startTour() {
+        if (tour != null) return
+        val steps = listOf(
+            TourOverlay.Step("The menu", "Everything lives behind this button. From a controller, press Select and Start " +
+                "together, or the Guide button. The Android Back button opens it too.", target = menuButton,
+                glyphs = listOf("Select", "+", "Start")),
+            TourOverlay.Step("Moving around the menu", "LB and RB switch between Games, Watch, Controls, Display, " +
+                "Buttons, Shield and Status. The D-pad moves, A selects, B backs out or closes.",
+                glyphs = listOf("LB", "RB", "A", "B")),
+            TourOverlay.Step("The mouse cursor", "When a game is in a menu, a cursor appears and the left stick moves it. " +
+                "Hold L3 and R3 together to show or hide it yourself.", glyphs = listOf("L3", "+", "R3")),
+            TourOverlay.Step("Your library", "Games holds the hubs and Watch the free movie services. On any site, " +
+                "\"Add this site\" keeps it there. The Shield tab shows what was blocked on the page.")
+        )
+        val overlay = TourOverlay(this, steps) {
+            tour?.let { root.removeView(it) }
+            tour = null
+            prefs.tourDone = true
+            webView?.isFocusable = true
+            webView?.isFocusableInTouchMode = true
+            webView?.requestFocus()
+        }
+        tour = overlay
+        webView?.isFocusable = false
+        webView?.isFocusableInTouchMode = false
+        root.addView(overlay, matchParent())
+        overlay.start()
+    }
 
     override fun openWebViewDevTools() {
         // Android System WebView's own settings screen (its flags apply to every WebView app).

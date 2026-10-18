@@ -2,6 +2,7 @@ package com.radiant.pcbrowser
 
 import android.content.Context
 import android.content.SharedPreferences
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -78,6 +79,43 @@ class Prefs(context: Context) {
         get() = HashSet(sp.getStringSet(K_THREAD_ORIGINS, DEFAULT_THREAD_ORIGINS) ?: DEFAULT_THREAD_ORIGINS)
         set(value) = sp.edit().putStringSet(K_THREAD_ORIGINS, HashSet(value)).apply()
 
+    /** Block ads and trackers with the bundled host list. */
+    var adBlock: Boolean
+        get() = sp.getBoolean(K_AD_BLOCK, true)
+        set(value) = sp.edit().putBoolean(K_AD_BLOCK, value).apply()
+
+    /** The swipe-through introduction has been seen. */
+    var introDone: Boolean
+        get() = sp.getBoolean(K_INTRO_DONE, false)
+        set(value) = sp.edit().putBoolean(K_INTRO_DONE, value).apply()
+
+    /** The on-screen tour of the main screen has been seen. */
+    var tourDone: Boolean
+        get() = sp.getBoolean(K_TOUR_DONE, false)
+        set(value) = sp.edit().putBoolean(K_TOUR_DONE, value).apply()
+
+    /** User-added bookmarks for a library section ("games" or "watch"). */
+    fun bookmarks(section: String): List<CommandDrawer.Bookmark> {
+        val raw = sp.getString(K_BOOKMARKS + section, null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val url = o.optString("url")
+                if (url.isEmpty()) null
+                else CommandDrawer.Bookmark(o.optString("title").ifEmpty { url }, o.optString("monogram").ifEmpty { "+" }, url, custom = true)
+            }
+        } catch (_: JSONException) {
+            emptyList()
+        }
+    }
+
+    fun setBookmarks(section: String, list: List<CommandDrawer.Bookmark>) {
+        val arr = JSONArray()
+        for (b in list) arr.put(JSONObject().put("title", b.title).put("monogram", b.monogram).put("url", b.url))
+        sp.edit().putString(K_BOOKMARKS + section, arr.toString()).apply()
+    }
+
     /** Controller button index (standard mapping 0..16) -> action string understood by the JS engine. */
     val binds: Map<Int, String>
         get() {
@@ -152,6 +190,10 @@ class Prefs(context: Context) {
         private const val K_IDENTITY = "identity"
         private const val K_AUTO_THREADS = "auto_threads"
         private const val K_THREAD_ORIGINS = "thread_origins"
+        private const val K_AD_BLOCK = "ad_block"
+        private const val K_INTRO_DONE = "intro_done"
+        private const val K_TOUR_DONE = "tour_done"
+        private const val K_BOOKMARKS = "bookmarks_"
 
         val DEFAULT_BINDS: Map<Int, String> = mapOf(
             0 to "Space",
