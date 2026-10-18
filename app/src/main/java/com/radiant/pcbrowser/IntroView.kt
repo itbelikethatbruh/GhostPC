@@ -113,6 +113,15 @@ class IntroView(
             override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {}
         }
         pager.offscreenPageLimit = 1
+        // The pager only swipes; keys go through handleKey, so it must never take focus
+        // (a focused RecyclerView draws Android's default focus highlight over the whole page).
+        pager.isFocusable = false
+        (pager.getChildAt(0) as? ViewGroup)?.let { rv ->
+            rv.isFocusable = false
+            rv.isFocusableInTouchMode = false
+            rv.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            rv.defaultFocusHighlightEnabled = false
+        }
         pager.setPageTransformer { page, position ->
             // Content drifts slightly slower than the page so pages feel layered, and fades at the edges.
             val p = position.coerceIn(-1f, 1f)
@@ -141,6 +150,9 @@ class IntroView(
         dots.gravity = Gravity.CENTER
         bar.addView(dots, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         next = Ui.pillButton(context, "Next", primary = true) { advance() }
+        // Holds focus even in touch mode, so the first controller press is not spent on focusing.
+        next.isFocusableInTouchMode = true
+        skip.isFocusableInTouchMode = true
         bar.addView(next)
         addView(bar, LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
 
@@ -168,19 +180,21 @@ class IntroView(
 
     /** Controller / keyboard: LB-RB and D-pad move between pages, A advances, B skips. */
     fun handleKey(event: KeyEvent): Boolean {
-        if (event.action != KeyEvent.ACTION_DOWN) {
-            return when (event.keyCode) {
-                KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_BUTTON_B -> true
-                else -> false
-            }
+        val handled = when (event.keyCode) {
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BUTTON_A,
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> true
+            else -> false
         }
+        if (!handled) return false
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount > 0) return true
         when (event.keyCode) {
-            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_DPAD_LEFT -> { go(pager.currentItem - 1); return true }
-            KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_DPAD_RIGHT -> { go(pager.currentItem + 1); return true }
-            KeyEvent.KEYCODE_BUTTON_B -> { finish(false); return true }
+            KeyEvent.KEYCODE_BUTTON_L1, KeyEvent.KEYCODE_DPAD_LEFT -> go(pager.currentItem - 1)
+            KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_DPAD_RIGHT -> go(pager.currentItem + 1)
+            KeyEvent.KEYCODE_BUTTON_B -> finish(false)
+            else -> if (findFocus() === skip) finish(false) else advance()
         }
-        return false
+        return true
     }
 
     private fun go(index: Int) {
@@ -221,31 +235,40 @@ class IntroView(
 
     private fun buildPage(page: Page): View {
         val outer = FrameLayout(context)
+        val dm = resources.displayMetrics
+        val landscape = dm.widthPixels > dm.heightPixels
         val content = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+            // Landscape phones are short: art on the left, words on the right.
+            orientation = if (landscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
             tag = "content"
             setPadding(dp(28f), 0, dp(28f), 0)
         }
-        val maxW = min(resources.displayMetrics.widthPixels, dp(620f))
+        val maxW = min(dm.widthPixels, dp(if (landscape) 900f else 620f))
         outer.addView(content, LayoutParams(maxW, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER_HORIZONTAL))
 
-        content.addView(page.art(context), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        content.addView(TextView(context).apply {
+        val words = if (landscape) LinearLayout(context).apply { orientation = LinearLayout.VERTICAL } else content
+        if (landscape) {
+            content.addView(page.art(context), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            content.addView(words, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.15f).also { it.marginStart = dp(28f) })
+        } else {
+            content.addView(page.art(context), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+        words.addView(TextView(context).apply {
             text = page.title
             typeface = Ui.DISPLAY
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (landscape) 27f else 30f)
             setTextColor(Ui.TEXT)
             setLineSpacing(0f, 1.02f)
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
-            it.topMargin = dp(22f)
+            it.topMargin = if (landscape) 0 else dp(22f)
         })
-        content.addView(TextView(context).apply {
+        words.addView(TextView(context).apply {
             text = page.body
             typeface = Ui.BODY
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, if (landscape) 14f else 15f)
             setTextColor(Ui.TEXT_DIM)
-            setLineSpacing(0f, 1.3f)
+            setLineSpacing(0f, 1.28f)
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
             it.topMargin = dp(10f)
         })

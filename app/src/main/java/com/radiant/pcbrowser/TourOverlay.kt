@@ -83,6 +83,7 @@ class TourOverlay(
         bar.addView(counter, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         bar.addView(Ui.pillButton(context, "End tour", primary = false) { finish() })
         next = Ui.pillButton(context, "Next", primary = true) { advance() }
+        next.isFocusableInTouchMode = true
         bar.addView(next, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
             it.marginStart = dp(8f)
         })
@@ -99,9 +100,18 @@ class TourOverlay(
     }
 
     fun handleKey(event: KeyEvent): Boolean {
-        if (event.keyCode == KeyEvent.KEYCODE_BUTTON_B || event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP) finish()
-            return true
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_BACK -> {
+                if (event.action == KeyEvent.ACTION_UP) finish()
+                return true
+            }
+            KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_BUTTON_R1, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                val focus = findFocus()
+                if (focus != null && focus !== next) return false // let "End tour" take its own click
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) advance()
+                return true
+            }
         }
         return false
     }

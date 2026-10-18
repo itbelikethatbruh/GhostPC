@@ -92,15 +92,15 @@ for i in 2 3 4 5; do
   sleep 1.2
   shot "02-intro-$i"
 done
-tap_desc "Show me around" || adb shell input keyevent KEYCODE_BUTTON_A
+adb shell input keyevent KEYCODE_BUTTON_A   # "Show me around"
 sleep 1.5
 shot "02-tour-1"
 for i in 2 3 4; do
-  tap_desc "Next" || adb shell input keyevent KEYCODE_BUTTON_A
+  adb shell input keyevent KEYCODE_BUTTON_A  # Next
   sleep 1
   shot "02-tour-$i"
 done
-tap_desc "Done" || adb shell input keyevent KEYCODE_BUTTON_A
+adb shell input keyevent KEYCODE_BUTTON_A    # Done
 sleep 1.5
 crashed && fail "The app crashed in the intro or tour"
 shot "02-home"
