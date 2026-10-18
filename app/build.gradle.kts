@@ -76,4 +76,6 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("androidx.webkit:webkit:1.18.0-rc01")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
+    // viewpager2 drags in an old androidx.fragment; the activity-result API needs 1.3+.
+    implementation("androidx.fragment:fragment:1.8.5")
 }
